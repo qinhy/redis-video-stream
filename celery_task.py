@@ -10,7 +10,10 @@ from typing import List
 import cv2
 import open3d as o3d
 import numpy as np
-# from scipy.spatial.transform import Rotation as R
+import cv2
+import redis
+import time
+from urllib.parse import urlparse
 
 from .calib import SurveyTargetsDetector
 from .PointCloud import Pillar, PointCloud, plane_equation    
@@ -40,12 +43,6 @@ def WrappTask(task:Task):
     task.progress = update_progress_state
     task.error = update_error_state
     return task 
-# Import the Celery application
-from celery_app import app
-import cv2
-import redis
-import time
-from urllib.parse import urlparse
 
 class SimpleMovingAverage(object):
     def __init__(self, value=0.0, count=7):

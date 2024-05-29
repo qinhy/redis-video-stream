@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from celery.result import AsyncResult
-from celery_app import app as celery_app
+from celery_task import CeleryTaskManager,celery_app
 from typing import Optional
 
 app = FastAPI()
@@ -10,7 +10,7 @@ async def start_capture(infile: Optional[int] = None, fps: float = 30.0, output:
     """
     Start a video capture task.
     """
-    task = celery_app.send_task('video_capture.capture_video', args=[infile, fps, output, url, fmt, maxlen, count])
+    task = CeleryTaskManager.capture_video.delay(infile, fps, output, url, fmt, maxlen, count)
     return {"message": "Task started", "task_id": task.id}
 
 @app.get("/task_status/{task_id}")
