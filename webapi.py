@@ -6,6 +6,7 @@ from typing import Optional
 import redis
 from urllib.parse import urlparse
 
+CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
 
 app = FastAPI()
 
@@ -52,6 +53,14 @@ async def stop_video_stream(redis_stream_key: str = 'camera:0', redis_url: str =
     task = CeleryTaskManager.stop_video_stream.delay(redis_stream_key, redis_url)
     return {"message": "stream stop", "task_id": task.id}
 
+@app.get("/stop_all_stream/")
+async def stop_all_stream(redis_url: str = 'redis://127.0.0.1:6379'):
+    """
+    stop all video stream task.
+    """
+    task = CeleryTaskManager.stop_all_stream.delay(redis_url)
+    return {"message": "all stream stop", "task_id": task.id}
+
 @app.get("/video_stream_info/")
 async def video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
     url = urlparse(redis_url)
@@ -60,6 +69,38 @@ async def video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
     for k in conn.keys(f'info:*'):
         info[k] = json.loads(conn.get(k))
     return info
+
+@app.get("/clone_stream/")
+async def clone_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
+                               write_stream_key: str='clone:0',maxlen:int=10,fmt:str='.jpg'):
+    """
+    Start a clone stream task.
+    """
+    task = CeleryTaskManager.clone_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
+                                                write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
+    return {"message": "clone stream started", "task_id": task.id}
+
+@app.get("/flip_stream/")
+async def flip_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
+                               write_stream_key: str='flip:0',maxlen:int=10,fmt:str='.jpg'):
+    """
+    Start a flip stream task.
+    """
+    task = CeleryTaskManager.flip_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
+                                                write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
+    return {"message": "flip stream started", "task_id": task.id}
+
+@app.get("/cv_resize_stream/")
+async def cv_resize_stream(w:int=100,h:int=100, redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
+                               write_stream_key: str='resize:0',maxlen:int=10,fmt:str='.jpg'):
+    """
+    Start a resize stream task.
+    """
+    task = CeleryTaskManager.cv_resize_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
+                                                         write_stream_key=write_stream_key,maxlen=maxlen,
+                                                         fmt=fmt,w=w,h=h)
+    return {"message": "resize stream started", "task_id": task.id}
+
 
 @app.get("/yolo_image_stream/")
 async def yolo_image_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',

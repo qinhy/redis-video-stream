@@ -133,8 +133,25 @@ class CeleryTaskManager:
         generator = VideoGenerator(video_src=video_src, fps=fps, width=width, height=height)
         writer = RedisStreamWriter(redis_url, redis_stream_key, maxlen=maxlen, fmt=fmt)
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
+
+        frame_count = 0
+        start_time = time.time()
         for image in generator:
             writer.write_to_stream(image, dict(count=generator.cam.get(cv2.CAP_PROP_POS_FRAMES)))     
+
+            # Process the image as needed
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+            frame_count += 1
+
+            # Display FPS on the image
+            cv2.putText(image, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.imshow(f'Streamed Image Raw {redis_stream_key}', image)
+            if cv2.waitKey(1) == 27:  # ESC key
+                cv2.destroyAllWindows()
+                return
+
 
     @staticmethod
     @celery_app.task(bind=True)    
@@ -148,7 +165,22 @@ class CeleryTaskManager:
         conn.delete(redis_stream_key)
         conn.delete(f'info:{redis_stream_key}')
         return {'msg':f'delete stream {redis_stream_key}'}
-        
+    
+    @staticmethod
+    @celery_app.task(bind=True)    
+    def stop_all_stream(t: Task, redis_url='redis://127.0.0.1:6379'):
+        url = urlparse(redis_url)
+        conn = redis.Redis(host=url.hostname, port=url.port)
+        info = {}
+        for k in conn.keys(f'info:*'):
+            redis_stream_key = k.decode().replace('info:','')
+            info = conn.get(f'info:{redis_stream_key}')
+            info = json.loads(info)
+            celery_app.control.revoke(info['task_id'], terminate=True)
+            conn.delete(redis_stream_key)
+            conn.delete(f'info:{redis_stream_key}')
+            return {'msg':f'delete stream {redis_stream_key}'}
+       
     @staticmethod
     @celery_app.task(bind=True)
     def cvshow_image_stream(t: Task, redis_url:str, stream_key:str):
@@ -164,43 +196,80 @@ class CeleryTaskManager:
 
             # Display FPS on the image
             cv2.putText(image, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.imshow('Streamed Image', image)
+            cv2.imshow(f'Streamed Image {stream_key}', image)
             if cv2.waitKey(1) == 27:  # ESC key
                 cv2.destroyAllWindows()
                 return
-
+            
     @staticmethod
-    @celery_app.task(bind=True)
-    def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
-                                            write_stream_key: str='ai-stream:0',maxlen=10,fmt='.jpg',
-                                            modelname:str='yolov5s6',conf=0.6):        
+    def stream2stream(image_processor=lambda i,image:(image,dict(count=i)),
+                      redis_url: str='redis://127.0.0.1:6379',read_stream_key: str='camera-stream:0',
+                      write_stream_key: str='out-stream:0',maxlen:int=10,fmt: str='.jpg',
+                      metadaata={}):
+        
+        conn = getredis(redis_url)
+        if is_stream_exists(conn,write_stream_key):return is_stream_exists(conn,write_stream_key)        
+        conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
+        conn.close()
 
         # Initialize Redis stream reader
         reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
         writer = RedisStreamWriter(redis_url, write_stream_key, maxlen=maxlen, fmt=fmt)
-        conn = getredis(redis_url)        
-        if is_stream_exists(conn,write_stream_key):return is_stream_exists(conn,write_stream_key)
+        for i,image in enumerate(reader.read_image_from_stream()):
+            image,frame_metadaata = image_processor(i,image)
+            writer.write_to_stream(image,frame_metadaata)
 
-        # Initialize YOLO model
+
+    @staticmethod
+    @celery_app.task(bind=True)
+    def clone_stream(t: Task,redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='clone-stream:0',maxlen:int=10,fmt: str='.jpg',):
+        
+        image_processor=lambda i,image:(image, dict(count=i))
+        metadaata=dict(task_id=t.request.id,video_src=read_stream_key,)
+        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=read_stream_key,
+                                    write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
+    @staticmethod
+    @celery_app.task(bind=True)
+    def flip_stream(t: Task,redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='flip-stream:0',maxlen:int=10,fmt: str='.jpg',):
+        
+        image_processor=lambda i,image:(cv2.flip(image, 1), dict(count=i))
+        metadaata=dict(task_id=t.request.id,video_src=read_stream_key,)
+        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=read_stream_key,
+                                    write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
+    @staticmethod
+    @celery_app.task(bind=True)
+    def cv_resize_stream(t: Task,w:int,h:int, redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='resize-stream:0',maxlen:int=10,fmt: str='.jpg',):
+        
+        image_processor=lambda i,image:(cv2.resize(image, (w,h)), dict(count=i))
+        metadaata=dict(task_id=t.request.id,video_src=read_stream_key,resize=(w,h))
+        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=read_stream_key,
+                                    write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
+
+    @staticmethod
+    @celery_app.task(bind=True)
+    def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='ai-stream:0',maxlen=10,fmt='.jpg',
+                                            modelname:str='yolov5s6',conf=0.6):
+        
         model = torch.hub.load(f'ultralytics/{modelname[:6]}', modelname, pretrained=True)
         model.conf = conf
         model.eval()
-        
-        conn.set(f'info:{write_stream_key}',json.dumps(dict(task_id=t.request.id,
-                                                            video_src=read_stream_key,
-                                                            modelname=modelname,
-                                                            conf=conf,
-                                                            )))
-        conn.close()
-
-        for i,image in enumerate(reader.read_image_from_stream()):
-            # Convert images to the format expected by YOLOv5
+        def image_processor(i,image,model=model):
             result = model(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             result.render()
             image = cv2.cvtColor(result.ims[0], cv2.COLOR_RGB2BGR)
-            writer.write_to_stream(image, dict(count=i))    
-            # cv2.imshow('Streamed Image with Detections', image)
-            # if cv2.waitKey(1) == 27:  # ESC key
-            #     cv2.destroyAllWindows()
-            #     break
+            return image, dict(count=i)
+
+        metadaata=dict(task_id=t.request.id,video_src=read_stream_key,
+                        modelname=modelname,conf=conf,)
+        
+        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=read_stream_key,
+                                    write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt)
