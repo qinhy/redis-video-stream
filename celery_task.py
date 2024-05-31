@@ -12,6 +12,9 @@ import cv2
 import time
 import redis
 from urllib.parse import urlparse
+import time
+import cv2
+import torch
 
 from celery import Celery
 from celery.app import task as Task
@@ -22,11 +25,20 @@ os.environ.setdefault('FORKED_BY_MULTIPROCESSING', '1')
 IP = '127.0.0.1'
 os.environ.setdefault('CELERY_BROKER_URL', 'redis://'+IP)
 os.environ.setdefault('CELERY_RESULT_BACKEND', 'redis://'+IP+'/0')
-# os.environ.setdefault('CELERY_BROKER_URL', f'amqp://guest@{IP}//')
-# os.environ.setdefault('CELERY_RESULT_BACKEND', f'amqp://guest@{IP}//')
-# os.environ.setdefault('CELERY_TASK_SERIALIZER', 'json')
 ####################################################################################
-celery_app = Celery('tasks')  # , broker='redis://'+IP)
+celery_app = Celery('tasks')  
+
+def getredis(redis_url):
+    url = urlparse(redis_url)
+    return redis.Redis(host=url.hostname, port=url.port)
+
+def is_stream_exists(conn,stream_key):
+        if conn.exists(stream_key):
+            info = conn.get(f'info:{stream_key}')
+            if info:
+                info = json.loads(info)
+                return f"Stream {stream_key} is already running. By task id of {info['task_id']}"
+        return False
 
 def WrappTask(task:Task):
     def update_progress_state(progress=1.0,msg=''):
@@ -65,21 +77,19 @@ class VideoGenerator:
 
 class RedisStreamWriter:
     def __init__(self, redis_url, stream_key, maxlen=1000, fmt='.jpg'):
-        url = urlparse(redis_url)
-        self.conn = redis.Redis(host=url.hostname, port=url.port)
+        self.conn = getredis(redis_url)
         self.stream_key = stream_key
         self.maxlen = maxlen
         self.fmt = fmt
 
-    def write_to_stream(self, image, count):
+    def write_to_stream(self, image, metadata={}):
         _, buffer = cv2.imencode(self.fmt, image)
-        message = {'image': buffer.tobytes(), 'count': count}
+        message = {'image': buffer.tobytes(), 'metadata': json.dumps(metadata)}
         self.conn.xadd(self.stream_key, message, maxlen=self.maxlen)
 
 class RedisStreamReader:
     def __init__(self, redis_url, stream_key):
-        url = urlparse(redis_url)
-        self.conn = redis.Redis(host=url.hostname, port=url.port)
+        self.conn = getredis(redis_url)
         self.stream_key = stream_key
 
     def read_raw_from_stream(self,count=10):
@@ -113,12 +123,9 @@ class CeleryTaskManager:
     @celery_app.task(bind=True)    
     def start_video_stream(t: Task, video_src:str, fps:float, width=800, height=600, fmt='.jpg',
                                     redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379', maxlen=10):
-        url = urlparse(redis_url)
-        conn = redis.Redis(host=url.hostname, port=url.port)
-        if conn.exists(redis_stream_key):
-            info = conn.get(f'info:{redis_stream_key}')
-            info = json.loads(info)
-            return f"Stream {redis_stream_key} is already running. By task id of {info['task_id']}"
+        conn = getredis(redis_url)
+        if_stream_exists = is_stream_exists(conn,redis_stream_key)
+        if if_stream_exists: return if_stream_exists
 
         conn.set(f'info:{redis_stream_key}',json.dumps(dict(task_id=t.request.id,
                                                             video_src=video_src, fps=fps, width=width, height=height, fmt=fmt)))
@@ -128,13 +135,12 @@ class CeleryTaskManager:
         writer = RedisStreamWriter(redis_url, redis_stream_key, maxlen=maxlen, fmt=fmt)
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
         for image in generator:
-            writer.write_to_stream(image, generator.cam.get(cv2.CAP_PROP_POS_FRAMES))     
+            writer.write_to_stream(image, dict(count=generator.cam.get(cv2.CAP_PROP_POS_FRAMES)))     
 
     @staticmethod
     @celery_app.task(bind=True)    
     def stop_video_stream(t: Task, redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
-        url = urlparse(redis_url)
-        conn = redis.Redis(host=url.hostname, port=url.port)
+        conn = getredis(redis_url)
         info = conn.get(f'info:{redis_stream_key}')
         if info is None:
             return {'msg':'no such stream'}
@@ -146,11 +152,11 @@ class CeleryTaskManager:
         
     @staticmethod
     @celery_app.task(bind=True)
-    def cvshow_image_stream(t: Task, redis_url:str, stream_key:str, batch_size=10):
+    def cvshow_image_stream(t: Task, redis_url:str, stream_key:str):
         reader = RedisStreamReader(redis_url=redis_url,stream_key=stream_key)
         frame_count = 0
         start_time = time.time()
-        for image in reader.read_image_from_stream(batch_size):
+        for image in reader.read_image_from_stream():
             # Process the image as needed
             current_time = time.time()
             elapsed_time = current_time - start_time
@@ -160,4 +166,39 @@ class CeleryTaskManager:
             # Display FPS on the image
             cv2.putText(image, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.imshow('Streamed Image', image)
-            cv2.waitKey(1)  # Display the image for a brief moment
+            if cv2.waitKey(1) == 27:  # ESC key
+                cv2.destroyAllWindows()
+                return
+
+    @staticmethod
+    @celery_app.task(bind=True)
+    def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='ai-stream:0',maxlen=10,fmt='.jpg',
+                                            modelname:str='yolov5s6'):        
+
+        # Initialize Redis stream reader
+        reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
+        # Initialize video generator and writer
+        writer = RedisStreamWriter(redis_url, write_stream_key, maxlen=maxlen, fmt=fmt)
+        conn = getredis(redis_url)        
+        if_stream_exists = is_stream_exists(conn,write_stream_key)
+        if if_stream_exists: return if_stream_exists
+
+        # Initialize YOLO model
+        model = torch.hub.load(f'ultralytics/{modelname[:6]}', modelname, pretrained=True)
+        model.eval()
+        
+        conn.set(f'info:{write_stream_key}',json.dumps(dict(task_id=t.request.id,
+                                                            video_src=read_stream_key)))
+        conn.close()
+
+        for i,image in enumerate(reader.read_image_from_stream()):
+            # Convert images to the format expected by YOLOv5
+            result = model(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            result.render()
+            image = cv2.cvtColor(result.ims[0], cv2.COLOR_RGB2BGR)
+            writer.write_to_stream(image, dict(count=i))    
+            # cv2.imshow('Streamed Image with Detections', image)
+            # if cv2.waitKey(1) == 27:  # ESC key
+            #     cv2.destroyAllWindows()
+            #     break
