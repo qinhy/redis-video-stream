@@ -49,11 +49,11 @@ class SimpleMovingAverage(object):
         self.current = self.current + (v-o)/self.count
 
 class Video:
-    def __init__(self, infile=0, fps=30.0):
-        self.isFile = not str(infile).isdecimal()
+    def __init__(self, video_src=0, fps=30.0):
+        self.isFile = not str(video_src).isdecimal()
         self.ts = time.time()
-        self.infile = infile
-        self.cam = cv2.VideoCapture(self.infile)
+        self.video_src = video_src
+        self.cam = cv2.VideoCapture(self.video_src)
         if not self.isFile:
             self.cam.set(cv2.CAP_PROP_FPS, fps)
             self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
@@ -73,10 +73,10 @@ class Video:
         return img
 
 @app.task
-def capture_video(infile, fps, output, url, fmt='.jpg', maxlen=10000, count=None):
+def capture_video(video_src, fps, output, url, fmt='.jpg', maxlen=10000, count=None):
     url = urlparse(url)
     conn = redis.Redis(host=url.hostname, port=url.port)
-    loader = Video(infile=infile, fps=fps)
+    loader = Video(video_src=video_src, fps=fps)
     for i, img in enumerate(loader):
         if count is not None and i >= count:
             break
