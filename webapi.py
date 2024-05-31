@@ -63,12 +63,14 @@ async def video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
 
 @app.get("/yolo_image_stream/")
 async def yolo_image_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
-                                            write_stream_key: str='ai:0',modelname:str='yolov5s6',maxlen:int=10,fmt:str='.jpg'):
+                                            write_stream_key: str='ai:0',modelname:str='yolov5s6',conf:float=0.6,
+                                            maxlen:int=10,fmt:str='.jpg'):
     """
     Start a yolo stream task.
     """
     task = CeleryTaskManager.yolo_image_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
-                                                         write_stream_key=write_stream_key,maxlen=maxlen,fmt=fmt,modelname=modelname)
+                                                         write_stream_key=write_stream_key,maxlen=maxlen,
+                                                         fmt=fmt,modelname=modelname,conf=conf)
     return {"message": "yolo stream started", "task_id": task.id}
 
 @app.get("/cvshow_image_stream/")

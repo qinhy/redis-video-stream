@@ -124,8 +124,7 @@ class CeleryTaskManager:
     def start_video_stream(t: Task, video_src:str, fps:float, width=800, height=600, fmt='.jpg',
                                     redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379', maxlen=10):
         conn = getredis(redis_url)
-        if_stream_exists = is_stream_exists(conn,redis_stream_key)
-        if if_stream_exists: return if_stream_exists
+        if is_stream_exists(conn,redis_stream_key):return is_stream_exists(conn,redis_stream_key)
 
         conn.set(f'info:{redis_stream_key}',json.dumps(dict(task_id=t.request.id,
                                                             video_src=video_src, fps=fps, width=width, height=height, fmt=fmt)))
@@ -174,22 +173,25 @@ class CeleryTaskManager:
     @celery_app.task(bind=True)
     def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='ai-stream:0',maxlen=10,fmt='.jpg',
-                                            modelname:str='yolov5s6'):        
+                                            modelname:str='yolov5s6',conf=0.6):        
 
         # Initialize Redis stream reader
         reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
         writer = RedisStreamWriter(redis_url, write_stream_key, maxlen=maxlen, fmt=fmt)
         conn = getredis(redis_url)        
-        if_stream_exists = is_stream_exists(conn,write_stream_key)
-        if if_stream_exists: return if_stream_exists
+        if is_stream_exists(conn,write_stream_key):return is_stream_exists(conn,write_stream_key)
 
         # Initialize YOLO model
         model = torch.hub.load(f'ultralytics/{modelname[:6]}', modelname, pretrained=True)
+        model.conf = conf
         model.eval()
         
         conn.set(f'info:{write_stream_key}',json.dumps(dict(task_id=t.request.id,
-                                                            video_src=read_stream_key)))
+                                                            video_src=read_stream_key,
+                                                            modelname=modelname,
+                                                            conf=conf,
+                                                            )))
         conn.close()
 
         for i,image in enumerate(reader.read_image_from_stream()):
