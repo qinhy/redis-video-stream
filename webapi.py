@@ -36,7 +36,7 @@ async def stop_task(task_id: str):
         return {"message": "Task already completed or does not exist", "task_id": task_id}
 
 @app.get("/start_video_stream/")
-async def start_video_stream(video_src: str = '0', fps: float = 30.0, width: int =800, height: int =600, fmt: str = '.jpg',
+async def start_video_stream(video_src: str = '0', fps: float = 30.0, width: int =848, height: int =480, fmt: str = '.jpg',
                              redis_stream_key: str = 'camera:0', redis_url: str = 'redis://127.0.0.1:6379',  maxlen: int = 10):
     """
     Start a video stream task.

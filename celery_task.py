@@ -15,6 +15,10 @@ from urllib.parse import urlparse
 import time
 import cv2
 import torch
+import json
+import numpy as np
+import cv2
+from multiprocessing import Lock, shared_memory
 
 from celery import Celery
 from celery.app import task as Task
@@ -74,23 +78,72 @@ class VideoGenerator:
         if not ret_val:
             raise StopIteration()
         return cv2.flip(img, 1) if not self.isFile else img
+    
+class SharedMemoryStreamWriter:
+    def __init__(self, shm_name, array_shape, dtype=np.uint8):
+        self.array_shape = array_shape
+        self.dtype = dtype
+        # Calculate the buffer size needed for the array
+        self.shm_size = int(np.prod(array_shape) * np.dtype(dtype).itemsize)
+        # Create the shared memory
+        self.shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.shm_size)
+        # Create the numpy array with the buffer from shared memory
+        self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
+
+    def write_to_stream(self, image):
+        # Ensure the image fits the predefined array shape and dtype
+        if image.shape != self.array_shape:
+            raise ValueError(f"Image does not match the predefined shape.({image.shape}!={self.array_shape})")
+        if image.dtype != self.dtype:
+            raise ValueError(f"Image does not match the predefined data type.({image.dtype}!={self.dtype})")
+        # Write the image to the shared memory buffer
+        np.copyto(self.buffer, image)
+
+    def close(self):
+        self.shm.close()
+        self.shm.unlink()
+
+class SharedMemoryStreamReader:
+    def __init__(self, shm_name, array_shape, dtype=np.uint8):
+        self.array_shape = array_shape
+        self.dtype = dtype
+        # Attach to the existing shared memory
+        self.shm = shared_memory.SharedMemory(name=shm_name)
+        # Map the numpy array to the shared memory
+        self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
+
+    def read_from_stream(self):
+        # Simply return a copy of the array to ensure the data remains consistent
+        return np.copy(self.buffer)
+
+    def close(self):
+        self.shm.close()
+
 
 class RedisStreamWriter:
-    def __init__(self, redis_url, stream_key, maxlen=1000, fmt='.jpg'):
+    def __init__(self, redis_url, stream_key, shape, maxlen=1000, fmt='.jpg'):
         self.conn = getredis(redis_url)
         self.stream_key = stream_key
         self.maxlen = maxlen
         self.fmt = fmt
+        self.smwriter = SharedMemoryStreamWriter(stream_key, shape)  # 10MB shared memory size
 
     def write_to_stream(self, image, metadata={}):
-        _, buffer = cv2.imencode(self.fmt, image)
-        message = {'image': buffer.tobytes(), 'metadata': json.dumps(metadata)}
+        # _, buffer = cv2.imencode(self.fmt, image)
+        # message = {'image': buffer.tobytes(), 'metadata': json.dumps(metadata)}
+        message = {'image': '', 'metadata': json.dumps(metadata)}
+        
+        self.smwriter.write_to_stream(image)
         self.conn.xadd(self.stream_key, message, maxlen=self.maxlen)
+
+    def close(self):
+        self.smwriter.close()
 
 class RedisStreamReader:
     def __init__(self, redis_url, stream_key):
         self.conn = getredis(redis_url)
         self.stream_key = stream_key
+        self.smreader = None#SharedMemoryStreamReader(stream_key, (720,1280,3))  # Same size as used by writer
 
     def read_raw_from_stream(self,count=10):
         last_id = '0-0'
@@ -107,10 +160,17 @@ class RedisStreamReader:
     def read_image_from_stream(self,count=10):
         for record in self.read_raw_from_stream(count=count):
             message_id, data = record
-            image_bytes = data[b'image']  # Assuming the image is stored under key 'image'
-            image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-            image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            # image_bytes = data[b'image']  # Assuming the image is stored under key 'image'
+            # image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+            # image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            if self.smreader is None:
+                metadata = json.loads(data[b'metadata'])
+                self.smreader = SharedMemoryStreamReader(self.stream_key, metadata['shape'])  # Same size as used by writer
+            image = self.smreader.read_from_stream()
             yield image
+    
+    def close(self):
+        self.smreader.close()
 
 class CeleryTaskManager:    
     @staticmethod
@@ -131,13 +191,13 @@ class CeleryTaskManager:
         conn.close()
         # Initialize video generator and writer
         generator = VideoGenerator(video_src=video_src, fps=fps, width=width, height=height)
-        writer = RedisStreamWriter(redis_url, redis_stream_key, maxlen=maxlen, fmt=fmt)
+        writer = RedisStreamWriter(redis_url, redis_stream_key, (height,width,3), maxlen=maxlen, fmt=fmt)
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
 
         frame_count = 0
         start_time = time.time()
         for image in generator:
-            writer.write_to_stream(image, dict(count=generator.cam.get(cv2.CAP_PROP_POS_FRAMES)))     
+            writer.write_to_stream(image, dict(count=generator.cam.get(cv2.CAP_PROP_POS_FRAMES),shape=image.shape))     
 
             # Process the image as needed
             current_time = time.time()
@@ -150,7 +210,8 @@ class CeleryTaskManager:
             cv2.imshow(f'Streamed Image Raw {redis_stream_key}', image)
             if cv2.waitKey(1) == 27:  # ESC key
                 cv2.destroyAllWindows()
-                return
+                break
+        writer.close()
 
 
     @staticmethod
@@ -199,7 +260,8 @@ class CeleryTaskManager:
             cv2.imshow(f'Streamed Image {stream_key}', image)
             if cv2.waitKey(1) == 27:  # ESC key
                 cv2.destroyAllWindows()
-                return
+                break
+        reader.close()
             
     @staticmethod
     def stream2stream(image_processor=lambda i,image:(image,dict(count=i)),
@@ -215,10 +277,15 @@ class CeleryTaskManager:
         # Initialize Redis stream reader
         reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
-        writer = RedisStreamWriter(redis_url, write_stream_key, maxlen=maxlen, fmt=fmt)
+        writer = None#RedisStreamWriter(redis_url, write_stream_key, shape=, maxlen=maxlen, fmt=fmt)
         for i,image in enumerate(reader.read_image_from_stream()):
             image,frame_metadaata = image_processor(i,image)
+            frame_metadaata['shape']=image.shape
+            if writer is None:
+                writer = RedisStreamWriter(redis_url, write_stream_key, shape=image.shape, maxlen=maxlen, fmt=fmt)
             writer.write_to_stream(image,frame_metadaata)
+        reader.close()
+        writer.close()
 
 
     @staticmethod
