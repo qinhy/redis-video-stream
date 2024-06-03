@@ -89,6 +89,7 @@ class VideoGenerator:
     
 class SharedMemoryStreamWriter:
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
+        shm_name = shm_name.replace(':','_')
         self.array_shape = array_shape
         self.dtype = dtype
         # Calculate the buffer size needed for the array
@@ -113,6 +114,7 @@ class SharedMemoryStreamWriter:
 
 class SharedMemoryStreamReader:
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
+        shm_name = shm_name.replace(':','_')
         self.array_shape = array_shape
         self.dtype = dtype
         # Attach to the existing shared memory
@@ -232,29 +234,30 @@ class CeleryTaskManager:
 
         frame_count = 0
         start_time = time.time()
+        try:
+            for i,(image,redis_metadata) in enumerate(reader.read_image_from_stream()):
+                
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+                frame_count += 1
+                redis_metadata['fps']=fps
+                
+                image,frame_metadaata = image_processor(i,image,redis_metadata)
 
-        for i,(image,redis_metadata) in enumerate(reader.read_image_from_stream()):
-            
-            current_time = time.time()
-            elapsed_time = current_time - start_time
-            fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-            frame_count += 1
-            redis_metadata['fps']=fps
-            
-            image,frame_metadaata = image_processor(i,image,redis_metadata)
+                if frame_metadaata is not None:
+                    redis_metadata.update(frame_metadaata)
 
-            if frame_metadaata is not None:
-                redis_metadata.update(frame_metadaata)
-
-            if write_stream_key is not None:
-                if writer is None:
-                    writer = stream_writer if stream_writer is not None else RedisStreamWriter(redis_url, write_stream_key, shape=image.shape, maxlen=maxlen, fmt=fmt)
-                writer.write_to_stream(image,redis_metadata)
-
-        if reader is not None:
-            reader.close()
-        if writer is not None and write_stream_key is not None:
-            writer.close()
+                if write_stream_key is not None:
+                    if writer is None:
+                        writer = stream_writer if stream_writer is not None else RedisStreamWriter(redis_url, write_stream_key, shape=image.shape, maxlen=maxlen, fmt=fmt)
+                    writer.write_to_stream(image,redis_metadata)
+        
+        finally:
+            if reader is not None:
+                reader.close()
+            if writer is not None and write_stream_key is not None:
+                writer.close()
 
     @staticmethod
     def debug_cvshow(image,fps,title):
