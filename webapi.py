@@ -90,6 +90,16 @@ async def flip_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: 
                                                 write_stream_key=write_stream_key)
     return {"message": "flip stream started", "task_id": task.id}
 
+@app.get("/split_stream/")
+async def split_stream(a:int,b:int,c:int,d:int,redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
+                               write_stream_key: str='split:0'):
+    """
+    Start a split stream task.
+    """
+    task = CeleryTaskManager.split_stream.delay(bbox=[a,b,c,d],redis_url=redis_url,read_stream_key=read_stream_key,
+                                                write_stream_key=write_stream_key)
+    return {"message": "split stream started", "task_id": task.id}
+
 @app.get("/cv_resize_stream/")
 async def cv_resize_stream(w:int=100,h:int=100, redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
                                write_stream_key: str='resize:0'):

@@ -320,6 +320,16 @@ class CeleryTaskManager:
                                     write_stream_key=write_stream_key)
     @staticmethod
     @celery_app.task(bind=True)
+    def split_stream(t: Task,bbox, redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='flip-stream:0'):
+        a,b,c,d = bbox
+        image_processor=lambda i,image,redis_metadata:(image[a:b,c:d], redis_metadata)
+        metadaata=dict(task_id=t.request.id,video_src=read_stream_key,bbox=bbox)
+        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=read_stream_key,
+                                    write_stream_key=write_stream_key)
+    @staticmethod
+    @celery_app.task(bind=True)
     def cv_resize_stream(t: Task,w:int,h:int, redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='resize-stream:0'):
         
