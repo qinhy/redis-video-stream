@@ -259,7 +259,8 @@ class CeleryTaskManager:
         cv2.imshow(title, image)
         if cv2.waitKey(1) == 27:  # ESC key
             cv2.destroyWindow(title)
-            raise ValueError('Force to stop.')
+            return False
+        return True
             
     @staticmethod
     @celery_app.task(bind=True)    
@@ -285,14 +286,17 @@ class CeleryTaskManager:
 
         def image_processor(i,image,redis_metadata,stream_key=stream_key):
             fps = redis_metadata.get('fps',0)            
-            CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed Image {stream_key}')
+            res = CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed Image {stream_key}')
+            if not res:raise ValueError('Force to stop.')
             return None,None
 
         metadaata=dict(task_id=t.request.id,video_src=stream_key)
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
-                                    redis_url=redis_url,read_stream_key=stream_key,
-                                    write_stream_key=None,
-                                    stream_reader=None,stream_writer=None)
+        try:
+            CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                        redis_url=redis_url,read_stream_key=stream_key,
+                                        write_stream_key=None)
+        except Exception as e:
+            cv2.destroyAllWindows()
         
     @staticmethod
     @celery_app.task(bind=True)
