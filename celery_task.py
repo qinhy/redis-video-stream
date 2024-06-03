@@ -61,7 +61,7 @@ class VideoGenerator:
         else:
             self.fps = self.cam.get(cv2.CAP_PROP_FPS)
 
-    def read_image_from_stream(self):
+    def read_from_stream(self):
         while True:
             yield next(self),{}
 
@@ -112,7 +112,7 @@ class SharedMemoryStreamReader:
         # Map the numpy array to the shared memory
         self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
 
-    def read_from_stream(self):
+    def read_from_sharedMemory(self):
         # Simply return a copy of the array to ensure the data remains consistent
         return np.copy(self.buffer)
 
@@ -144,23 +144,23 @@ class RedisStreamReader:
         self.stream_key = stream_key
         self.smreader = None
 
-    def read_raw_from_stream(self,count=1):
+    def read_from_redis_stream(self,count=1):
         last_id = '0-0'
         while True:
             messages = self.conn.xread({self.stream_key: last_id},count=count, block=1000)
             if messages:
                 for _, records in messages:
                     for record in records:
-                        message_id, data = record
+                        message_id, redis_metadata = record
+                        if self.smreader is None:
+                            self.smreader = SharedMemoryStreamReader(self.stream_key,
+                                                                    np.frombuffer(redis_metadata[b'shape'], dtype=int))
                         last_id = message_id  # Update last_id to the latest message_id read
-                        yield record
+                        yield redis_metadata
 
-    def read_image_from_stream(self,count=1):
-        for record in self.read_raw_from_stream(count=count):
-            message_id, redis_metadata = record
-            if self.smreader is None:
-                self.smreader = SharedMemoryStreamReader(self.stream_key,np.frombuffer(redis_metadata[b'shape'], dtype=int))
-            image = self.smreader.read_from_stream()
+    def read_from_stream(self,count=1):
+        for redis_metadata in self.read_from_redis_stream(count=count):
+            image = self.smreader.read_from_sharedMemory()
             yield image,redis_metadata
     
     def close(self):
@@ -203,7 +203,7 @@ class CeleryTaskManager:
         return {'msg':f'delete all stream {allks}'}
 
     @staticmethod
-    def stream2stream(image_processor=lambda i,image,redis_metadata:(image,dict(count=i)),
+    def stream2stream(image_processor=lambda i,image,redis_metadata:(image,redis_metadata),
                       redis_url: str='redis://127.0.0.1:6379',read_stream_key: str='camera-stream:0',
                       write_stream_key: str='out-stream:0',metadaata={},
                       stream_reader=None,stream_writer=None):
@@ -223,7 +223,7 @@ class CeleryTaskManager:
 
         start_time = time.time()
         try:
-            for frame_count,(image,redis_metadata) in enumerate(reader.read_image_from_stream()):
+            for frame_count,(image,redis_metadata) in enumerate(reader.read_from_stream()):
                 
                 elapsed_time = time.time() - start_time
                 redis_metadata['fps']= frame_count / elapsed_time if elapsed_time > 0 else 0
@@ -303,7 +303,7 @@ class CeleryTaskManager:
     def clone_stream(t: Task,redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='clone-stream:0'):
         
-        image_processor=lambda i,image,redis_metadata:(image, dict(count=i))
+        image_processor=lambda i,image,redis_metadata:(image, redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key)
         CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
@@ -313,7 +313,7 @@ class CeleryTaskManager:
     def flip_stream(t: Task,redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='flip-stream:0'):
         
-        image_processor=lambda i,image,redis_metadata:(cv2.flip(image, 1), dict(count=i))
+        image_processor=lambda i,image,redis_metadata:(cv2.flip(image, 1), redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key)
         CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
@@ -323,7 +323,7 @@ class CeleryTaskManager:
     def cv_resize_stream(t: Task,w:int,h:int, redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='resize-stream:0'):
         
-        image_processor=lambda i,image,redis_metadata:(cv2.resize(image, (w,h)), dict(count=i))
+        image_processor=lambda i,image,redis_metadata:(cv2.resize(image, (w,h)), redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key,resize=(w,h))
         CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
@@ -342,7 +342,7 @@ class CeleryTaskManager:
             result = model(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             result.render()
             image = cv2.cvtColor(result.ims[0], cv2.COLOR_RGB2BGR)
-            return image, dict(count=i)
+            return image, redis_metadata
 
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key,
                         modelname=modelname,conf=conf)
