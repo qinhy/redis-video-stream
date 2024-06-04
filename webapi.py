@@ -1,7 +1,11 @@
+import io
 import json
+
+import cv2
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
-from celery_task import CeleryTaskManager,celery_app
+from celery_task import CeleryTaskManager, RedisStreamReader,celery_app
 from typing import Optional
 import redis
 from urllib.parse import urlparse
@@ -123,12 +127,29 @@ async def yolo_image_stream(redis_url: str='redis://127.0.0.1:6379', read_stream
     return {"message": "yolo stream started", "task_id": task.id}
 
 @app.get("/cvshow_image_stream/")
-async def cvshow_image_stream(redis_url: str = 'redis://127.0.0.1:6379', stream_key: str = 'camera:0'):
+async def cvshow_image_stream(redis_url: str = 'redis://127.0.0.1:6379', stream_key: str = 'camera:0', fontscale:float=1):
     """
     Start reading image stream from Redis.
     """
     try:
-        task = CeleryTaskManager.cvshow_image_stream.delay(redis_url, stream_key)
+        task = CeleryTaskManager.cvshow_image_stream.delay(redis_url, stream_key, fontscale)
         return {"message": "Stream cvshow task started", "task_id": task.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/web_image_show/{read_stream_key}")
+def web_image_show(read_stream_key:str='camera:0',redis_url: str = 'redis://127.0.0.1:6379'):
+
+    reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
+    def generate_frames():
+        for frame_count,(image,redis_metadata) in enumerate(reader.read_from_stream()):
+            # Convert the Numpy array to a format that can be sent over the network
+            _, buffer = cv2.imencode('.png', image)
+            frame = buffer.tobytes()            
+            # Use multipart/x-mixed-replace with boundary frame to keep the connection open
+            yield (b'--frame\r\n'
+                b'Content-Type: image/png\r\n\r\n' + frame + b'\r\n')
+
+    # Create a StreamingResponse that sends the image to the client
+    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace;boundary=frame")

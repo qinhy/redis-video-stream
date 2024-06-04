@@ -254,8 +254,8 @@ class CeleryTaskManager:
                 return {'msg':f'delete stream {write_stream_key}'}
 
     @staticmethod
-    def debug_cvshow(image,fps,title):
-        cv2.putText(image, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+    def debug_cvshow(image,fps,title,fontscale=1.0):
+        cv2.putText(image, f"FPS: {fps:.2f}", (int(10*fontscale), int(30*fontscale)), cv2.FONT_HERSHEY_SIMPLEX, fontscale, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.imshow(title, image)
         if cv2.waitKey(1) == 27:  # ESC key
             cv2.destroyWindow(title)
@@ -282,11 +282,11 @@ class CeleryTaskManager:
        
     @staticmethod
     @celery_app.task(bind=True)
-    def cvshow_image_stream(t: Task, redis_url:str, stream_key:str):
+    def cvshow_image_stream(t: Task, redis_url:str, stream_key:str, fontscale:float=1):
 
-        def image_processor(i,image,redis_metadata,stream_key=stream_key):
+        def image_processor(i,image,redis_metadata,stream_key=stream_key,fontscale=fontscale):
             fps = redis_metadata.get('fps',0)            
-            res = CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed Image {stream_key}')
+            res = CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed Image {stream_key}',fontscale)
             if not res:raise ValueError('Force to stop.')
             return None,None
 
