@@ -210,8 +210,14 @@ class CeleryTaskManager:
         
         conn = getredis(redis_url)
         
+        if read_stream_key is not None:
+            if not is_stream_exists(conn,read_stream_key):
+                raise ValueError(f'read stream key {read_stream_key} is not exists!')
+        
         if write_stream_key is not None:
-            if is_stream_exists(conn,write_stream_key):return is_stream_exists(conn,write_stream_key)        
+            if is_stream_exists(conn,write_stream_key):                
+                raise ValueError(f'write stream key {write_stream_key} is already exists!')
+            
             conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
 
         conn.close()
@@ -275,8 +281,8 @@ class CeleryTaskManager:
 
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
         metadaata=dict(task_id=t.request.id,video_src=video_src, fps=fps, width=width, height=height)
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
-                                    redis_url=redis_url,read_stream_key=redis_stream_key,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+                                    redis_url=redis_url,read_stream_key=None,
                                     write_stream_key=redis_stream_key,
                                     stream_reader=stream_reader)
        
@@ -292,11 +298,12 @@ class CeleryTaskManager:
 
         metadaata=dict(task_id=t.request.id,video_src=stream_key)
         try:
-            CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+            return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                         redis_url=redis_url,read_stream_key=stream_key,
                                         write_stream_key=None)
         except Exception as e:
             cv2.destroyAllWindows()
+            return str(e)
         
     @staticmethod
     @celery_app.task(bind=True)
@@ -305,7 +312,7 @@ class CeleryTaskManager:
         
         image_processor=lambda i,image,redis_metadata:(image, redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key)
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
                                     write_stream_key=write_stream_key)
     @staticmethod
@@ -315,7 +322,7 @@ class CeleryTaskManager:
         
         image_processor=lambda i,image,redis_metadata:(cv2.flip(image, 1), redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key)
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
                                     write_stream_key=write_stream_key)
     @staticmethod
@@ -325,7 +332,7 @@ class CeleryTaskManager:
         a,b,c,d = bbox
         image_processor=lambda i,image,redis_metadata:(image[a:b,c:d], redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key,bbox=bbox)
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
                                     write_stream_key=write_stream_key)
     @staticmethod
@@ -335,7 +342,7 @@ class CeleryTaskManager:
         
         image_processor=lambda i,image,redis_metadata:(cv2.resize(image, (w,h)), redis_metadata)
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key,resize=(w,h))
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
                                     write_stream_key=write_stream_key)
 
@@ -357,6 +364,6 @@ class CeleryTaskManager:
         metadaata=dict(task_id=t.request.id,video_src=read_stream_key,
                         modelname=modelname,conf=conf)
         
-        CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
+        return CeleryTaskManager.stream2stream(image_processor=image_processor,metadaata=metadaata,
                                     redis_url=redis_url,read_stream_key=read_stream_key,
                                     write_stream_key=write_stream_key)
