@@ -174,32 +174,35 @@ class CeleryTaskManager:
         return celery_app.control.revoke(task_id, terminate=True)
 
     @staticmethod
-    @celery_app.task(bind=True)    
-    def stop_video_stream(t: Task, redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
+    def _stop_stream(redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
         conn = getredis(redis_url)
         info = conn.get(f'info:{redis_stream_key}')
         if info is None:
             return {'msg':'no such stream'}
         info = json.loads(info)
-        celery_app.control.revoke(info['task_id'], terminate=True)
         conn.delete(redis_stream_key)
         conn.delete(f'info:{redis_stream_key}')
+        return info
+    
+    @staticmethod
+    @celery_app.task(bind=True)    
+    def stop_video_stream(t: Task, redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
+        info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
+        if 'task_id' in info:
+            celery_app.control.revoke(info['task_id'], terminate=True)
         return {'msg':f'delete stream {redis_stream_key}'}
     
     @staticmethod
     @celery_app.task(bind=True)    
     def stop_all_stream(t: Task, redis_url='redis://127.0.0.1:6379'):
-        url = urlparse(redis_url)
-        conn = redis.Redis(host=url.hostname, port=url.port)
-        info = {}
+        conn = getredis(redis_url)
         allks = conn.keys(f'info:*')
+        conn.close()
         for k in allks:
             redis_stream_key = k.decode().replace('info:','')
-            info = conn.get(f'info:{redis_stream_key}')
-            info = json.loads(info)
-            celery_app.control.revoke(info['task_id'], terminate=True)
-            conn.delete(redis_stream_key)
-            conn.delete(f'info:{redis_stream_key}')
+            info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
+            if 'task_id' in info:
+                celery_app.control.revoke(info['task_id'], terminate=True)
         return {'msg':f'delete all stream {allks}'}
 
     @staticmethod
@@ -225,7 +228,7 @@ class CeleryTaskManager:
         # Initialize Redis stream reader
         reader = stream_reader if stream_reader is not None else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
-        writer = None
+        writer = stream_writer if stream_writer is not None else None
 
         start_time = time.time()
         try:
@@ -239,24 +242,19 @@ class CeleryTaskManager:
                 if frame_metadaata is not None:
                     redis_metadata.update(frame_metadaata)
 
-                if write_stream_key is not None:
-                    if writer is None:
-                        writer = stream_writer if stream_writer is not None else RedisStreamWriter(redis_url, write_stream_key, shape=image.shape)
+                if writer:
                     writer.write_to_stream(image,redis_metadata)
+                elif write_stream_key is not None:
+                    writer = RedisStreamWriter(redis_url, write_stream_key, shape=image.shape)
+                    
         
         finally:
             if reader is not None:
                 reader.close()
             if write_stream_key is not None:
                 if writer is not None:
-                    writer.close()
-                conn = getredis(redis_url)
-                info = conn.get(f'info:{write_stream_key}')
-                if info is None:
-                    return {'msg':'no such stream'}
-                info = json.loads(info)
-                conn.delete(write_stream_key)
-                conn.delete(f'info:{write_stream_key}')
+                    writer.close()                
+                CeleryTaskManager._stop_stream(write_stream_key,redis_url)
                 return {'msg':f'delete stream {write_stream_key}'}
 
     @staticmethod
@@ -303,7 +301,7 @@ class CeleryTaskManager:
                                         write_stream_key=None)
         except Exception as e:
             cv2.destroyAllWindows()
-            return str(e)
+            raise ValueError(str(e))
         
     @staticmethod
     @celery_app.task(bind=True)
