@@ -137,6 +137,8 @@ class RedisStreamWriter:
 
     def close(self):
         self.smwriter.close()
+        self.conn.delete(self.stream_key)
+        self.conn.close()
 
 class RedisStreamReader:
     def __init__(self, redis_url, stream_key):
@@ -223,8 +225,7 @@ class CeleryTaskManager:
             
             conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
 
-        conn.close()
-
+        res = {}
         # Initialize Redis stream reader
         reader = stream_reader if stream_reader is not None else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
@@ -246,16 +247,27 @@ class CeleryTaskManager:
                     writer.write_to_stream(image,redis_metadata)
                 elif write_stream_key is not None:
                     writer = RedisStreamWriter(redis_url, write_stream_key, shape=image.shape)
-                    
-        
+
+                if write_stream_key is not None and frame_count%1000==100:
+                    metadaata['fps'] = redis_metadata['fps']
+                    conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
+
+        except Exception as e:            
+                res['error'] = str(e)
+
         finally:
+            conn.close()
             if reader is not None:
                 reader.close()
+            
+            if writer is not None:
+                writer.close()                
+
             if write_stream_key is not None:
-                if writer is not None:
-                    writer.close()                
                 CeleryTaskManager._stop_stream(write_stream_key,redis_url)
-                return {'msg':f'delete stream {write_stream_key}'}
+                res['msg'] = f'delete stream {write_stream_key}'
+                
+            return res
 
     @staticmethod
     def debug_cvshow(image,fps,title,fontscale=1.0):
