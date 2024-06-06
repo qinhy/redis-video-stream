@@ -1,9 +1,10 @@
 import cv2
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
 import redis
 from celery_task import CeleryTaskManager, RedisStreamReader,celery_app, get_video_stream_info
+from starlette.background import BackgroundTask
 
 CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
 redis.Redis(host='127.0.0.1', port=6379).flushdb()
@@ -141,6 +142,7 @@ def web_image_show(read_stream_key:str='camera:0',redis_url: str = 'redis://127.
             # Use multipart/x-mixed-replace with boundary frame to keep the connection open
             yield (b'--frame\r\n'
                 b'Content-Type: image/png\r\n\r\n' + frame + b'\r\n')
-
+            
     # Create a StreamingResponse that sends the image to the client
-    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace;boundary=frame")
+    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace;boundary=frame", 
+                                 background=BackgroundTask(lambda : reader.close()))  
