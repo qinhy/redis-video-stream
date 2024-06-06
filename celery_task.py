@@ -226,11 +226,11 @@ class CeleryTaskManager:
         
         conn = getredis(redis_url)
         
-        if read_stream_key is not None:
+        if read_stream_key:
             if not is_stream_exists(conn,read_stream_key):
                 raise ValueError(f'read stream key {read_stream_key} is not exists!')
         
-        if write_stream_key is not None:
+        if write_stream_key:
             if is_stream_exists(conn,write_stream_key):                
                 raise ValueError(f'write stream key {write_stream_key} is already exists!')
             
@@ -238,29 +238,36 @@ class CeleryTaskManager:
 
         res = {}
         # Initialize Redis stream reader
-        reader = stream_reader if stream_reader is not None else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
+        reader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
-        writer = stream_writer if stream_writer is not None else None
-
-        start_time = time.time()
+        writer = stream_writer if stream_writer else None
+        img_gen = reader.read_from_stream()
+            
         try:
-            for frame_count,(image,redis_metadata) in enumerate(reader.read_from_stream()):
-                
-                elapsed_time = time.time() - start_time
-                redis_metadata['fps']= frame_count / elapsed_time if elapsed_time > 0 else 0
-                
+            # first run
+            image,redis_metadata = next(img_gen)
+            image,frame_metadaata = image_processor(0,image,redis_metadata)
+            
+            if write_stream_key and writer is None:
+                writer = RedisStreamWriter(redis_url, write_stream_key, shape=image.shape)
+
+            for frame_count,(image,redis_metadata) in enumerate(img_gen):
+
+                if frame_count%100==0:                    
+                    start_time = time.time()
+                else:
+                    elapsed_time = time.time() - start_time + 1e-5
+                    metadaata['fps'] = redis_metadata['fps'] = (frame_count%100) / elapsed_time
+
                 image,frame_metadaata = image_processor(frame_count,image,redis_metadata)
 
-                if frame_metadaata is not None:
+                if frame_metadaata:
                     redis_metadata.update(frame_metadaata)
 
                 if writer:
                     writer.write_to_stream(image,redis_metadata)
-                elif write_stream_key is not None:
-                    writer = RedisStreamWriter(redis_url, write_stream_key, shape=image.shape)
 
-                if write_stream_key is not None and frame_count%1000==100:
-                    metadaata['fps'] = redis_metadata['fps']
+                if write_stream_key and frame_count%1000==100:
                     conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
 
         except Exception as e:            
@@ -268,10 +275,10 @@ class CeleryTaskManager:
 
         finally:
             conn.close()
-            if reader is not None:
+            if reader and hasattr(reader,'close'):
                 reader.close()
             
-            if writer is not None:
+            if writer and hasattr(writer,'close'):
                 writer.close()                
 
             if write_stream_key is not None:
