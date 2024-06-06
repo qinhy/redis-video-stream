@@ -1,1 +1,1 @@
-python -m uvicorn webapi:app
+python -m uvicorn webapi:app --host 0.0.0.0

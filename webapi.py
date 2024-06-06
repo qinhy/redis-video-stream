@@ -2,9 +2,11 @@ import cv2
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
+import redis
 from celery_task import CeleryTaskManager, RedisStreamReader,celery_app, get_video_stream_info
 
 CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
+redis.Redis(host='127.0.0.1', port=6379).flushdb()
 
 app = FastAPI()
 

@@ -1,4 +1,5 @@
 import json
+from multiprocessing.managers import SharedMemoryManager
 import os
 import sys
 from typing import Generator
@@ -20,9 +21,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 os.environ.setdefault('FORKED_BY_MULTIPROCESSING', '1')
 os.environ.setdefault('CELERY_BROKER_URL', 'redis://'+IP)
 os.environ.setdefault('CELERY_RESULT_BACKEND', 'redis://'+IP+'/0')
-redis.Redis(host=IP, port=6379).flushdb()
 ####################################################################################
-celery_app = Celery('tasks')  
+celery_app = Celery('tasks')
+celery_app.conf.update(
+    worker_pool_restarts=True,
+)
 
 def getredis(redis_url):
     url = urlparse(redis_url)
@@ -39,12 +42,7 @@ def get_video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
     return info
 
 def is_stream_exists(conn,stream_key):
-        if conn.exists(stream_key):
-            info = conn.get(f'info:{stream_key}')
-            if info:
-                info = json.loads(info)
-                return f"Stream {stream_key} is already running. By task id of {info['task_id']}"
-        return False
+    return conn.exists(stream_key) and conn.exists(f'info:{stream_key}')
 
 def WrappTask(task:Task):
     def update_progress_state(progress=1.0,msg=''):
@@ -107,10 +105,39 @@ class SharedMemoryStreamWriter:
         self.dtype = dtype
         # Calculate the buffer size needed for the array
         self.shm_size = int(np.prod(array_shape) * np.dtype(dtype).itemsize)
+
+        if self.check_shared_memory_exists(shm_name):
+            self.close_shared_memory(shm_name)
+        
         # Create the shared memory
         self.shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.shm_size)
         # Create the numpy array with the buffer from shared memory
         self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
+
+    def check_shared_memory_exists(self, name):
+        try:
+            # Attempt to attach to an existing shared memory segment.
+            shm = shared_memory.SharedMemory(name=name)
+            shm.close()  # Immediately close it if successful
+            return True  # If no exception, it exists
+        except FileNotFoundError:
+            # If it does not exist, FileNotFoundError will be raised
+            return False
+        
+    def close_shared_memory(self, shm_name):
+        """
+        Closes and unlinks a shared memory segment.
+
+        Args:
+        shm (shared_memory.SharedMemory): The shared memory segment to close.
+        """
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name)
+            shm.close()  # Detach the shared memory from the process
+            shm.unlink()  # Remove the shared memory from the system
+            print("Shared memory closed and unlinked successfully.")
+        except Exception as e:
+            print(f"Failed to close and unlink shared memory: {e}")
 
     def write_to_stream(self, image):
         # Ensure the image fits the predefined array shape and dtype
@@ -163,7 +190,8 @@ class RedisStreamWriter:
         self.conn.xadd(self.stream_key, message, maxlen=self.maxlen)
 
     def close(self):
-        self.smwriter.close()
+        if self.use_shared_memory:
+            self.smwriter.close()
         self.conn.delete(self.stream_key)
         self.conn.close()
 
@@ -178,7 +206,7 @@ class RedisStreamReader(CommonStreamReader):
         last_id = '0-0'
         while True:
             messages = self.conn.xread({self.stream_key: last_id},count=count, block=1000)
-            if messages:
+            if len(messages)>0:
                 for _, records in messages:
                     for record in records:
                         message_id, redis_metadata = record
@@ -187,6 +215,8 @@ class RedisStreamReader(CommonStreamReader):
                                                                     np.frombuffer(redis_metadata[b'shape'], dtype=int))
                         last_id = message_id  # Update last_id to the latest message_id read
                         yield redis_metadata
+            else:
+                raise ValueError('no message from redis')
 
     def read_stream_generator(self,count=1):
         for redis_metadata in self.read_from_redis_stream(count=count):
@@ -249,17 +279,17 @@ class CeleryTaskManager:
         
         conn = getredis(redis_url)
         
-        if read_stream_key:
+        if read_stream_key is not None:
             if not is_stream_exists(conn,read_stream_key):
                 raise ValueError(f'read stream key {read_stream_key} is not exists!')
         
-        if write_stream_key:
+        if write_stream_key is not None:
             if is_stream_exists(conn,write_stream_key):                
                 raise ValueError(f'write stream key {write_stream_key} is already exists!')
             
             conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
 
-        res = {}
+        res = {'msg':''}
         # Initialize Redis stream reader
         reader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key).read_stream_generator()
         # Initialize video generator and writer
@@ -299,13 +329,15 @@ class CeleryTaskManager:
             conn.close()
             if reader and hasattr(reader,'close'):
                 reader.close()
+                res['msg'] += f'\nstream {write_stream_key} reader.close()'
             
             if writer and hasattr(writer,'close'):
-                writer.close()                
+                writer.close()
+                res['msg'] += f'\stream {write_stream_key} writer.close()'
 
             if write_stream_key is not None:
                 CeleryTaskManager._stop_stream(write_stream_key,redis_url)
-                res['msg'] = f'delete stream {write_stream_key}'
+                res['msg'] += f'\ndelete stream {write_stream_key}'
                 
             return res
 

@@ -26,5 +26,5 @@ while True:
 print({"message": "yolo stream task started", "task_id": task.id})
 
 task = CeleryTaskManager.cv_resize_stream.delay(redis_url=redis_url,read_stream_key='ai:0',
-                                                write_stream_key='resize:0',w=192*2,h=108*2)
+                                                write_stream_key='resize:0',w=192,h=108)
 print({"message": "resize stream task started", "task_id": task.id})
