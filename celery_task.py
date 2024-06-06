@@ -14,17 +14,28 @@ from celery import Celery
 from celery.app import task as Task
 
 ####################################################################################
+IP = '127.0.0.1'
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 os.environ.setdefault('FORKED_BY_MULTIPROCESSING', '1')
-IP = '127.0.0.1'
 os.environ.setdefault('CELERY_BROKER_URL', 'redis://'+IP)
 os.environ.setdefault('CELERY_RESULT_BACKEND', 'redis://'+IP+'/0')
+redis.Redis(host=IP, port=6379).flushdb()
 ####################################################################################
 celery_app = Celery('tasks')  
 
 def getredis(redis_url):
     url = urlparse(redis_url)
     return redis.Redis(host=url.hostname, port=url.port)
+
+def get_video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
+    conn = getredis(redis_url)
+    info = {}
+    for k in conn.keys(f'info:*'):
+        k = k.decode()
+        if not conn.exists(k.replace('info:','')):
+            continue
+        info[k] = json.loads(conn.get(k))
+    return info
 
 def is_stream_exists(conn,stream_key):
         if conn.exists(stream_key):
@@ -365,6 +376,8 @@ class CeleryTaskManager:
         model = torch.hub.load(f'ultralytics/{modelname[:6]}', modelname, pretrained=True)
         model.conf = conf
         model.eval()
+        model((np.random.rand(1280,1280,3)*255).astype(np.uint8)) # for pre loading
+
         def image_processor(i,image,redis_metadata,model=model):
             result = model(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             result.render()

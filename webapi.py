@@ -1,14 +1,8 @@
-import io
-import json
-
 import cv2
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
-from celery_task import CeleryTaskManager, RedisStreamReader,celery_app
-from typing import Optional
-import redis
-from urllib.parse import urlparse
+from celery_task import CeleryTaskManager, RedisStreamReader,celery_app, get_video_stream_info
 
 CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
 
@@ -47,7 +41,7 @@ async def start_video_stream(video_src: str = '0', fps: float = 30.0, width: int
     """
     task = CeleryTaskManager.start_video_stream.delay(video_src, fps, width, height,
                                                       redis_stream_key, redis_url)
-    return {"message": "video stream started", "task_id": task.id}
+    return {"message": "video stream task started", "task_id": task.id}
 
 @app.get("/stop_video_stream/")
 async def stop_video_stream(redis_stream_key: str = 'camera:0', redis_url: str = 'redis://127.0.0.1:6379'):
@@ -67,12 +61,7 @@ async def stop_all_stream(redis_url: str = 'redis://127.0.0.1:6379'):
 
 @app.get("/video_stream_info/")
 async def video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
-    url = urlparse(redis_url)
-    conn = redis.Redis(host=url.hostname, port=url.port)
-    info = {}
-    for k in conn.keys(f'info:*'):
-        info[k] = json.loads(conn.get(k))
-    return info
+    return get_video_stream_info(redis_url)
 
 @app.get("/clone_stream/")
 async def clone_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
@@ -82,7 +71,7 @@ async def clone_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key:
     """
     task = CeleryTaskManager.clone_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
                                                 write_stream_key=write_stream_key)
-    return {"message": "clone stream started", "task_id": task.id}
+    return {"message": "clone stream task started", "task_id": task.id}
 
 @app.get("/flip_stream/")
 async def flip_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
@@ -92,7 +81,7 @@ async def flip_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: 
     """
     task = CeleryTaskManager.flip_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
                                                 write_stream_key=write_stream_key)
-    return {"message": "flip stream started", "task_id": task.id}
+    return {"message": "flip stream task started", "task_id": task.id}
 
 @app.get("/split_stream/")
 async def split_stream(a:int,b:int,c:int,d:int,redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
@@ -102,7 +91,7 @@ async def split_stream(a:int,b:int,c:int,d:int,redis_url: str='redis://127.0.0.1
     """
     task = CeleryTaskManager.split_stream.delay(bbox=[a,b,c,d],redis_url=redis_url,read_stream_key=read_stream_key,
                                                 write_stream_key=write_stream_key)
-    return {"message": "split stream started", "task_id": task.id}
+    return {"message": "split stream task started", "task_id": task.id}
 
 @app.get("/cv_resize_stream/")
 async def cv_resize_stream(w:int=100,h:int=100, redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
@@ -112,7 +101,7 @@ async def cv_resize_stream(w:int=100,h:int=100, redis_url: str='redis://127.0.0.
     """
     task = CeleryTaskManager.cv_resize_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
                                                          write_stream_key=write_stream_key,w=w,h=h)
-    return {"message": "resize stream started", "task_id": task.id}
+    return {"message": "resize stream task started", "task_id": task.id}
 
 
 @app.get("/yolo_image_stream/")
@@ -124,7 +113,7 @@ async def yolo_image_stream(redis_url: str='redis://127.0.0.1:6379', read_stream
     """
     task = CeleryTaskManager.yolo_image_stream.delay(redis_url=redis_url,read_stream_key=read_stream_key,
                                                          write_stream_key=write_stream_key,modelname=modelname,conf=conf)
-    return {"message": "yolo stream started", "task_id": task.id}
+    return {"message": "yolo stream task started", "task_id": task.id}
 
 @app.get("/cvshow_image_stream/")
 async def cvshow_image_stream(redis_url: str = 'redis://127.0.0.1:6379', stream_key: str = 'camera:0', fontscale:float=1):
