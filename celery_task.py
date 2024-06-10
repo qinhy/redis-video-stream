@@ -6,6 +6,7 @@ from typing import Generator
 from urllib.parse import urlparse
 import time
 from multiprocessing import shared_memory
+import uuid
 
 import cv2
 import redis
@@ -59,10 +60,11 @@ def WrappTask(task:Task):
 
 class CommonStreamReader:
 
-    def read_stream_generator(self,count=1):
-        while True:
-            for i in range(count):
-                yield np.random.rand(640,640,3),{}
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return None,{}
 
     def close(self):
         pass
@@ -82,10 +84,6 @@ class VideoStreamReader(CommonStreamReader):
         else:
             self.fps = self.cam.get(cv2.CAP_PROP_FPS)
 
-    def read_stream_generator(self,count=1):
-        while True:
-            yield next(self),{}
-
     def close(self):
         del self.cam
 
@@ -96,11 +94,13 @@ class VideoStreamReader(CommonStreamReader):
         ret_val, img = self.cam.read()
         if not ret_val:
             raise StopIteration()
-        return cv2.flip(img, 1) if not self.isFile else img
+        res = (cv2.flip(img, 1),{}) if not self.isFile else (img,{})
+        return res
     
 class SharedMemoryStreamWriter:
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
         shm_name = shm_name.replace(':','_')
+        self.uuid = uuid.uuid4()
         self.array_shape = array_shape
         self.dtype = dtype
         # Calculate the buffer size needed for the array
@@ -155,6 +155,7 @@ class SharedMemoryStreamWriter:
 class SharedMemoryStreamReader:
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
         shm_name = shm_name.replace(':','_')
+        self.uuid = uuid.uuid4()
         self.array_shape = array_shape
         self.dtype = dtype
         # Attach to the existing shared memory
@@ -172,12 +173,19 @@ class SharedMemoryStreamReader:
 
 class RedisStreamWriter:
     def __init__(self, redis_url, stream_key, shape, maxlen=10, use_shared_memory=True):
+        self.uuid = uuid.uuid4()
         self.conn = getredis(redis_url)
         self.stream_key = stream_key
         self.maxlen = maxlen
         self.use_shared_memory = use_shared_memory
         if self.use_shared_memory:
             self.smwriter = SharedMemoryStreamWriter(stream_key, shape)
+        
+        self.conn.set(f'{RedisStreamWriter}:{self.uuid}',json.dumps(dict(stream_key=stream_key, shape=shape)))
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
 
     def write_to_stream(self, image, metadata={}):
         if image is not None:
@@ -193,44 +201,53 @@ class RedisStreamWriter:
         if self.use_shared_memory:
             self.smwriter.close()
         self.conn.delete(self.stream_key)
+        self.conn.delete(f'{RedisStreamWriter}:{self.uuid}')
         self.conn.close()
 
 class RedisStreamReader(CommonStreamReader):
     def __init__(self, redis_url, stream_key, use_shared_memory=True):
+        self.uuid = uuid.uuid4()
         self.conn = getredis(redis_url)
         self.stream_key = stream_key
         self.smreader = None
         self.use_shared_memory = use_shared_memory
+        self.conn.set(f'{RedisStreamReader}:{self.uuid}',json.dumps(dict(stream_key=stream_key)))
+        self._stop = False
+        self.last_id = '0-0'
 
-    def read_from_redis_stream(self,count=1):
-        last_id = '0-0'
-        while True:
-            messages = self.conn.xread({self.stream_key: last_id},count=count, block=1000)
-            if len(messages)>0:
-                for _, records in messages:
-                    for record in records:
-                        message_id, redis_metadata = record
-                        if self.smreader is None and self.use_shared_memory:
-                            self.smreader = SharedMemoryStreamReader(self.stream_key,
-                                                                    np.frombuffer(redis_metadata[b'shape'], dtype=int))
-                        last_id = message_id  # Update last_id to the latest message_id read
-                        yield redis_metadata
-            else:
-                raise ValueError('no message from redis')
+    def stop(self):
+        self._stop = True
 
-    def read_stream_generator(self,count=1):
-        for redis_metadata in self.read_from_redis_stream(count=count):
-            if self.use_shared_memory:
-                image = self.smreader.read_from_sharedMemory()
-            else:
-                shape = np.frombuffer(redis_metadata[b'shape'], dtype=int)
-                image = np.frombuffer(redis_metadata[b'image'], dtype=np.uint8)
-                # print(shape,image.shape)
-                image = image.reshape(shape)
-            yield image,redis_metadata
+    def __iter__(self):
+        return self
+
+    def __next__(self,count=1):        
+        if self._stop:
+            raise StopIteration()
+        messages = self.conn.xread({self.stream_key: self.last_id},count=count, block=1000)
+        if len(messages)>0:
+            for _, records in messages:
+                for record in records:
+                    message_id, redis_metadata = record
+                    if self.smreader is None and self.use_shared_memory:
+                        self.smreader = SharedMemoryStreamReader(self.stream_key,
+                                                                np.frombuffer(redis_metadata[b'shape'], dtype=int))
+                    self.last_id = message_id  # Update last_id to the latest message_id read
+                    if self.use_shared_memory:
+                        image = self.smreader.read_from_sharedMemory()
+                    else:
+                        shape = np.frombuffer(redis_metadata[b'shape'], dtype=int)
+                        image = np.frombuffer(redis_metadata[b'image'], dtype=np.uint8)
+                        # print(shape,image.shape)
+                        image = image.reshape(shape)
+                    return image,redis_metadata
+        else:
+            raise ValueError('no message from redis')
     
     def close(self):
         self.smreader.close()
+        self.conn.delete(f'{RedisStreamReader}:{self.uuid}')
+        self.conn.close()
 
 class CeleryTaskManager:    
     @staticmethod
@@ -253,10 +270,15 @@ class CeleryTaskManager:
     @staticmethod
     @celery_app.task(bind=True)    
     def stop_video_stream(t: Task, redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
-        info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
-        if 'task_id' in info:
-            celery_app.control.revoke(info['task_id'], terminate=True)
-        return {'msg':f'delete stream {redis_stream_key}'}
+        conn = getredis(redis_url)
+        metadaata = conn.get(f'info:{redis_stream_key}')
+        metadaata = json.loads(metadaata)
+        metadaata['stop'] = True
+        conn.set(f'info:{redis_stream_key}',json.dumps(metadaata))
+        # info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
+        # if 'task_id' in info:
+        #     celery_app.control.revoke(info['task_id'], terminate=True)
+        return {'msg':f'stop stream {redis_stream_key}'}
     
     @staticmethod
     @celery_app.task(bind=True)    
@@ -266,16 +288,22 @@ class CeleryTaskManager:
         conn.close()
         for k in allks:
             redis_stream_key = k.decode().replace('info:','')
-            info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
-            if 'task_id' in info:
-                celery_app.control.revoke(info['task_id'], terminate=True)
-        return {'msg':f'delete all stream {allks}'}
+            metadaata = conn.get(f'info:{redis_stream_key}')
+            metadaata = json.loads(metadaata)
+            metadaata['stop'] = True
+            conn.set(f'info:{redis_stream_key}',json.dumps(metadaata))
+            # info = CeleryTaskManager._stop_stream(redis_stream_key,redis_url)
+            # if 'task_id' in info:
+            #     celery_app.control.revoke(info['task_id'], terminate=True)
+        return {'msg':f'stop all stream {allks}'}
 
     @staticmethod
     def stream2stream(frame_processor=lambda i,image,frame_metadata:(image,frame_metadata),
                       redis_url: str='redis://127.0.0.1:6379',read_stream_key: str='camera-stream:0',
                       write_stream_key: str='out-stream:0',metadaata={},
-                      stream_reader:Generator=None,stream_writer=None):
+                      stream_reader:CommonStreamReader=None,stream_writer=None):
+        
+        metadaata['stop'] = False
         
         conn = getredis(redis_url)
         
@@ -291,7 +319,7 @@ class CeleryTaskManager:
 
         res = {'msg':''}
         # Initialize Redis stream reader
-        reader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key).read_stream_generator()
+        reader:CommonStreamReader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
         writer = stream_writer if stream_writer else None
             
@@ -320,6 +348,12 @@ class CeleryTaskManager:
                     writer.write_to_stream(image,frame_metadata)
 
                 if write_stream_key and frame_count%1000==100:
+                    metadaata = conn.get(f'info:{write_stream_key}')
+                    metadaata = json.loads(metadaata)
+                    if metadaata.get('stop',True):
+                        if reader and hasattr(reader,'stop'):reader.stop()
+                        if writer and hasattr(writer,'stop'):writer.stop()
+                        break
                     conn.set(f'info:{write_stream_key}',json.dumps(metadaata))
 
         except Exception as e:            
@@ -359,7 +393,7 @@ class CeleryTaskManager:
             # fps = frame_metadata.get('fps',0)
             # CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed directly from camera to {stream_key}')
             return image,frame_metadata
-        stream_reader=VideoStreamReader(video_src=video_src, fps=fps, width=width, height=height).read_stream_generator()
+        stream_reader=VideoStreamReader(video_src=video_src, fps=fps, width=width, height=height)
 
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
         metadaata=dict(task_id=t.request.id,video_src=video_src, fps=fps, width=width, height=height)

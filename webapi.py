@@ -136,7 +136,7 @@ def web_image_show(read_stream_key:str='camera:0',redis_url: str = 'redis://127.
     reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
     def generate_frames(reader=reader):
         try:
-            for frame_count,(image,metadata) in enumerate(reader.read_stream_generator()):
+            for frame_count,(image,metadata) in enumerate(reader):
                 # Convert the Numpy array to a format that can be sent over the network
                 _, buffer = cv2.imencode('.png', image)
                 frame = buffer.tobytes()            
