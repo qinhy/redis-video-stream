@@ -134,14 +134,18 @@ async def cvshow_image_stream(redis_url: str = 'redis://127.0.0.1:6379', stream_
 def web_image_show(read_stream_key:str='camera:0',redis_url: str = 'redis://127.0.0.1:6379'):
 
     reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
-    def generate_frames():
-        for frame_count,(image,metadata) in enumerate(reader.read_stream_generator()):
-            # Convert the Numpy array to a format that can be sent over the network
-            _, buffer = cv2.imencode('.png', image)
-            frame = buffer.tobytes()            
-            # Use multipart/x-mixed-replace with boundary frame to keep the connection open
-            yield (b'--frame\r\n'
-                b'Content-Type: image/png\r\n\r\n' + frame + b'\r\n')
+    def generate_frames(reader=reader):
+        try:
+            for frame_count,(image,metadata) in enumerate(reader.read_stream_generator()):
+                # Convert the Numpy array to a format that can be sent over the network
+                _, buffer = cv2.imencode('.png', image)
+                frame = buffer.tobytes()            
+                # Use multipart/x-mixed-replace with boundary frame to keep the connection open
+                yield (b'--frame\r\n'
+                    b'Content-Type: image/png\r\n\r\n' + frame + b'\r\n')
+        except Exception as e:
+            print(e)
+            reader.close()
             
     # Create a StreamingResponse that sends the image to the client
     return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace;boundary=frame", 
