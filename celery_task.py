@@ -348,8 +348,8 @@ class CeleryTaskManager:
                     writer.write_to_stream(image,frame_metadata)
 
                 if write_stream_key and frame_count%1000==100:
-                    metadaata = conn.get(f'info:{write_stream_key}')
-                    metadaata = json.loads(metadaata)
+                    fps,metadaata = metadaata['fps'],json.loads(conn.get(f'info:{write_stream_key}'))
+                    metadaata['fps'] = fps
                     if metadaata.get('stop',True):
                         if reader and hasattr(reader,'stop'):reader.stop()
                         if writer and hasattr(writer,'stop'):writer.stop()
