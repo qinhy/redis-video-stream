@@ -58,46 +58,98 @@ def WrappTask(task:Task):
     return task 
 
 
-class CommonStreamReader:
 
-    def __iter__(self):
-        return self
+class CommonIO:
+    class State:
+        class Reader:
+            def read(self):
+                raise ValueError("not implemented")         
+            def close(self):
+                raise ValueError("not implemented")
+        class Writer:
+            def write(self):
+                raise ValueError("not implemented")
+            def close(self):
+                raise ValueError("not implemented")
+            
 
-    def __next__(self):
-        return None,{}
+class CommonStream(CommonIO):
+    class State:
+        class StreamReader(CommonIO.State.Reader):
+            
+            def __iter__(self):
+                return self
 
-    def close(self):
-        pass
+            def __next__(self):
+                return super().read(),{}
+            
+        class StreamWriter(CommonIO.State.Writer):
+            
+            def stop(self):
+                raise ValueError("not implemented")
+            
+class VideoStreamReader(CommonStream.State.Reader):
+    class State:
+        @staticmethod
+        def isFile(p):
+            return not str(p).isdecimal()
+        class Base:
+            def __init__(self, video_src=0, fps=30.0, width=800, height=600):      
+                self.video_src=video_src
+                self.cam = cv2.VideoCapture(self.video_src)
+                self.cam.set(cv2.CAP_PROP_FPS, fps)
+                self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                
+                self.fps = self.cam.get(cv2.CAP_PROP_FPS)
+                self.width = self.cam.get(cv2.CAP_PROP_FRAME_WIDTH,)
+                self.height = self.cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-class VideoStreamReader(CommonStreamReader):
-    def __init__(self, video_src=0, fps=30.0, width=800, height=600):
-        self.video_src = video_src if video_src is not None else 0
-        self.isFile = not str(self.video_src).isdecimal()
-        if not self.isFile:
-            self.video_src = int(self.video_src)
-        self.cam = cv2.VideoCapture(self.video_src)
+            def close(self):
+                del self.cam
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                raise ValueError("not implemented")
+        class Camera(Base):                
+            def __next__(self):
+                ret_val, img = self.cam.read()
+                if not ret_val:raise StopIteration()
+                return cv2.flip(img, 1),{}
+
+        class File(Base):                
+            def __next__(self):
+                ret_val, img = self.cam.read()
+                if not ret_val:raise StopIteration()
+                return img,{}
+
         
-        if not self.isFile:
-            self.cam.set(cv2.CAP_PROP_FPS, fps)
-            self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    def __init__(self, video_src=0, fps=30.0, width=800, height=600):
+        self.state = VideoStreamReader.State.Base()
+        if VideoStreamReader.State.isFile(video_src):
+            self.state = VideoStreamReader.State.File(int(video_src),fps,width,height)
         else:
-            self.fps = self.cam.get(cv2.CAP_PROP_FPS)
+            self.state = VideoStreamReader.State.Camera(video_src,fps,width,height)
+        
+        self.fps = self.state.fps
+        self.width = self.state.width
+        self.height = self.state.height
 
     def close(self):
-        del self.cam
+        self.state.close()
 
     def __iter__(self):
-        return self
+        return self.state.__iter__()
 
     def __next__(self):
-        ret_val, img = self.cam.read()
-        if not ret_val:
-            raise StopIteration()
-        res = (cv2.flip(img, 1),{}) if not self.isFile else (img,{})
-        return res
+        return self.state.__next__()
     
-class SharedMemoryStreamWriter:
+
+class SharedMemoryIO(CommonIO):
+
+class SharedMemoryWriter(CommonIO.State.Writer):
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
         shm_name = shm_name.replace(':','_')
         self.uuid = uuid.uuid4()
@@ -106,40 +158,34 @@ class SharedMemoryStreamWriter:
         # Calculate the buffer size needed for the array
         self.shm_size = int(np.prod(array_shape) * np.dtype(dtype).itemsize)
 
-        if self.check_shared_memory_exists(shm_name):
-            self.close_shared_memory(shm_name)
+        # if self.check_shared_memory_exists(shm_name):
+        #     self.close_shared_memory(shm_name)
         
         # Create the shared memory
         self.shm = shared_memory.SharedMemory(name=shm_name, create=True, size=self.shm_size)
         # Create the numpy array with the buffer from shared memory
         self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
 
-    def check_shared_memory_exists(self, name):
-        try:
-            # Attempt to attach to an existing shared memory segment.
-            shm = shared_memory.SharedMemory(name=name)
-            shm.close()  # Immediately close it if successful
-            return True  # If no exception, it exists
-        except FileNotFoundError:
-            # If it does not exist, FileNotFoundError will be raised
-            return False
+    # def check_shared_memory_exists(self, name):
+    #     try:
+    #         # Attempt to attach to an existing shared memory segment.
+    #         shm = shared_memory.SharedMemory(name=name)
+    #         shm.close()  # Immediately close it if successful
+    #         return True  # If no exception, it exists
+    #     except FileNotFoundError:
+    #         # If it does not exist, FileNotFoundError will be raised
+    #         return False
         
-    def close_shared_memory(self, shm_name):
-        """
-        Closes and unlinks a shared memory segment.
+    # def close_shared_memory(self, shm_name):
+    #     try:
+    #         shm = shared_memory.SharedMemory(name=shm_name)
+    #         shm.close()  # Detach the shared memory from the process
+    #         shm.unlink()  # Remove the shared memory from the system
+    #         print("Shared memory closed and unlinked successfully.")
+    #     except Exception as e:
+    #         print(f"Failed to close and unlink shared memory: {e}")
 
-        Args:
-        shm (shared_memory.SharedMemory): The shared memory segment to close.
-        """
-        try:
-            shm = shared_memory.SharedMemory(name=shm_name)
-            shm.close()  # Detach the shared memory from the process
-            shm.unlink()  # Remove the shared memory from the system
-            print("Shared memory closed and unlinked successfully.")
-        except Exception as e:
-            print(f"Failed to close and unlink shared memory: {e}")
-
-    def write_to_stream(self, image):
+    def write(self, image):
         # Ensure the image fits the predefined array shape and dtype
         if image.shape != self.array_shape:
             raise ValueError(f"Image does not match the predefined shape.({image.shape}!={self.array_shape})")
@@ -147,12 +193,12 @@ class SharedMemoryStreamWriter:
             raise ValueError(f"Image does not match the predefined data type.({image.dtype}!={self.dtype})")
         # Write the image to the shared memory buffer
         np.copyto(self.buffer, image)
-
+    
     def close(self):
         self.shm.close()
         self.shm.unlink()
 
-class SharedMemoryStreamReader:
+class SharedMemoryReader(CommonIO.State.Reader):
     def __init__(self, shm_name, array_shape, dtype=np.uint8):
         shm_name = shm_name.replace(':','_')
         self.uuid = uuid.uuid4()
@@ -163,10 +209,9 @@ class SharedMemoryStreamReader:
         # Map the numpy array to the shared memory
         self.buffer = np.ndarray(array_shape, dtype=dtype, buffer=self.shm.buf)
 
-    def read_from_sharedMemory(self):
-        # Simply return a copy of the array to ensure the data remains consistent
-        return np.copy(self.buffer)
-
+    def read(self):
+        return np.copy(self.buffer)       
+    
     def close(self):
         self.shm.close()
 
@@ -179,7 +224,7 @@ class RedisStreamWriter:
         self.maxlen = maxlen
         self.use_shared_memory = use_shared_memory
         if self.use_shared_memory:
-            self.smwriter = SharedMemoryStreamWriter(stream_key, shape)
+            self.smwriter = SharedMemoryWriter(stream_key, shape)
         
         self.conn.set(f'{RedisStreamWriter}:{self.uuid}',json.dumps(dict(stream_key=stream_key, shape=shape)))
         self._stop = False
@@ -192,7 +237,7 @@ class RedisStreamWriter:
             metadata['shape']=np.asarray(image.shape,dtype=int).tobytes()
         message = metadata
         if self.use_shared_memory:
-            self.smwriter.write_to_stream(image)
+            self.smwriter.write(image)
         else:
             metadata['image']=np.asarray(image,dtype=np.uint8).tobytes()
         self.conn.xadd(self.stream_key, message, maxlen=self.maxlen)
@@ -204,7 +249,7 @@ class RedisStreamWriter:
         self.conn.delete(f'{RedisStreamWriter}:{self.uuid}')
         self.conn.close()
 
-class RedisStreamReader(CommonStreamReader):
+class RedisStreamReader(CommonStream.State.Reader):
     def __init__(self, redis_url, stream_key, use_shared_memory=True):
         self.uuid = uuid.uuid4()
         self.conn = getredis(redis_url)
@@ -230,11 +275,11 @@ class RedisStreamReader(CommonStreamReader):
                 for record in records:
                     message_id, redis_metadata = record
                     if self.smreader is None and self.use_shared_memory:
-                        self.smreader = SharedMemoryStreamReader(self.stream_key,
+                        self.smreader = SharedMemoryReader(self.stream_key,
                                                                 np.frombuffer(redis_metadata[b'shape'], dtype=int))
                     self.last_id = message_id  # Update last_id to the latest message_id read
                     if self.use_shared_memory:
-                        image = self.smreader.read_from_sharedMemory()
+                        image = self.smreader.read()
                     else:
                         shape = np.frombuffer(redis_metadata[b'shape'], dtype=int)
                         image = np.frombuffer(redis_metadata[b'image'], dtype=np.uint8)
@@ -301,7 +346,7 @@ class CeleryTaskManager:
     def stream2stream(frame_processor=lambda i,image,frame_metadata:(image,frame_metadata),
                       redis_url: str='redis://127.0.0.1:6379',read_stream_key: str='camera-stream:0',
                       write_stream_key: str='out-stream:0',metadaata={},
-                      stream_reader:CommonStreamReader=None,stream_writer=None):
+                      stream_reader:CommonStream.State.Reader=None,stream_writer=None):
         
         metadaata['stop'] = False
         
@@ -319,7 +364,7 @@ class CeleryTaskManager:
 
         res = {'msg':''}
         # Initialize Redis stream reader
-        reader:CommonStreamReader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
+        reader:CommonStream.State.Reader = stream_reader if stream_reader else RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
         # Initialize video generator and writer
         writer = stream_writer if stream_writer else None
             
