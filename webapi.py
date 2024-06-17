@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
 import redis
-from celery_task import CeleryTaskManager, RedisStreamReader,celery_app, get_video_stream_info
+from celery_task import CeleryTaskManager, RedisStream,celery_app, get_video_stream_info
 from starlette.background import BackgroundTask
 
 CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
@@ -133,7 +133,7 @@ async def cvshow_image_stream(redis_url: str = 'redis://127.0.0.1:6379', stream_
 @app.get("/web_image_show/{read_stream_key}")
 def web_image_show(read_stream_key:str='camera:0',redis_url: str = 'redis://127.0.0.1:6379'):
 
-    reader = RedisStreamReader(redis_url=redis_url, stream_key=read_stream_key)
+    reader = RedisStream().reader(redis_url=redis_url, stream_key=read_stream_key)
     def generate_frames(reader=reader):
         try:
             for frame_count,(image,metadata) in enumerate(reader):

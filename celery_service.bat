@@ -1,1 +1,0 @@
-nssm.exe install celery
