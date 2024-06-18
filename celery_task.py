@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from typing import List
 from urllib.parse import urlparse
 import time
 from multiprocessing import shared_memory
@@ -24,12 +25,9 @@ os.environ.setdefault('CELERY_RESULT_BACKEND', 'redis://'+IP+'/0')
 celery_app = Celery('tasks')
 celery_app.conf.update(worker_pool_restarts=True)
 
-def getredis(redis_url):
-    url = urlparse(redis_url)
-    return redis.Redis(host=url.hostname, port=url.port)
-
 def get_video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
-    conn = getredis(redis_url)
+    url = urlparse(redis_url)
+    conn = redis.Redis(host=url.hostname, port=url.port)
     info = {}
     for k in conn.keys(f'info:*'):
         k = k.decode()
@@ -37,9 +35,6 @@ def get_video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
             continue
         info[k] = json.loads(conn.get(k))
     return info
-
-def is_stream_exists(conn,stream_key):
-    return conn.exists(stream_key) and conn.exists(f'info:{stream_key}')
 
 def WrappTask(task:Task):
     def update_progress_state(progress=1.0,msg=''):
@@ -111,6 +106,9 @@ class CommonStreamIO(CommonIO):
             def write(self, data, metadata={}):
                 raise ValueError("[StreamWriter]: not implemented")
             
+    def __init__(self, state: State.Base = None):
+        self.state = state
+
     def __iter__(self):
         return self.state
     
@@ -119,6 +117,9 @@ class CommonStreamIO(CommonIO):
     
     def write(self, data, metadata={}):
         return self.state.write(data, metadata)
+    
+    def stop(self):
+        self.state.stop()
 
 class SharedMemoryIO(CommonIO):
     class State(CommonIO.State):
@@ -159,11 +160,55 @@ class SharedMemoryIO(CommonIO):
         return self
 
 class RedisStream(CommonStreamIO):
+    @staticmethod
+    def getredis(redis_url):
+        if type(redis_url) is not str:return redis_url
+        url = urlparse(redis_url)
+        return redis.Redis(host=url.hostname, port=url.port)
+
+    @staticmethod
+    def steam_list(redis_url) -> List:
+        return [i.decode().replace('info:','') for i in RedisStream.getredis(redis_url).keys(f'info:*')]
+    
+    @staticmethod
+    def stream_exists(redis_url,stream_key) -> bool:
+        conn = RedisStream.getredis(redis_url)
+        return conn.exists(stream_key) and conn.exists(f'info:{stream_key}')       
+    
+    @staticmethod
+    def steam_info_set(redis_url,stream_key,metadata={}):
+        RedisStream.getredis(redis_url).set(f'info:{stream_key}',json.dumps(metadata))
+    
+    @staticmethod
+    def steam_info_get(redis_url,stream_key):
+        conn = RedisStream.getredis(redis_url)
+        if RedisStream.stream_exists(conn,stream_key):
+            return json.loads(conn.get(f'info:{stream_key}'))
+        return None
+    
+    @staticmethod
+    def steam_info_delete(redis_url,stream_key):
+        RedisStream.getredis(redis_url).delete(f'info:{stream_key}')
+    
+    @staticmethod
+    def steam_stop(redis_url,stream_key):
+        conn = RedisStream.getredis(redis_url)
+        metadata = RedisStream.steam_info_get(conn,stream_key)
+        metadata['stop'] = True
+        RedisStream.steam_info_set(conn,stream_key,metadata)
+        return {'msg':f'stop stream {stream_key}'}
+    
+    @staticmethod
+    def steam_delete(redis_url,stream_key):
+        conn = RedisStream.getredis(redis_url)
+        conn.delete(stream_key)
+        conn.delete(f'info:{stream_key}')
+    
     class State(CommonStreamIO.State):
         class Base(CommonStreamIO.State.Base):
             def __init__(self, redis_url, stream_key, shape=None, maxlen=10, use_shared_memory=True):
                 self.uuid = uuid.uuid4()
-                self.conn = getredis(redis_url)
+                self.conn = RedisStream.getredis(redis_url)
                 self.redis_url = redis_url
                 self.stream_key = stream_key
                 self.shape = shape
@@ -173,39 +218,34 @@ class RedisStream(CommonStreamIO):
                 self.smIO:SharedMemoryIO = None
                 self.conn.set(f'{self.__class__.__name__}:{self.uuid}',json.dumps(dict(stream_key=stream_key, shape=shape)))
 
-            def write_info(self, metadata:dict={}):
-                self.conn.set(f'info:{self.stream_key}',json.dumps(metadata))
-
-            # def read_info(self,):
-            #     meta = self.conn.get(f'info:{self.stream_key}')
-            #     if meta is None:raise ValueError(f'no info of info:{self.stream_key}')
-            #     return json.loads(meta)
-
             def stop(self):
                 self._stop = True
-                info = self.conn.get(f'info:{self.stream_key}')
-                if info is None:
-                    return {'msg':'no such stream'}
-                info = json.loads(info)
-                self.conn.delete(self.stream_key)
-                self.conn.delete(f'info:{self.stream_key}')
 
             def close(self):
+                self.stop()
+
                 if self.use_shared_memory and self.smIO is not None:
                     self.smIO.close()
                 self.conn.delete(self.stream_key)
                 self.conn.delete(f'{self.__class__.__name__}:{self.uuid}')
+                
+                if RedisStream.stream_exists(self.conn,self.stream_key):
+                    RedisStream.steam_delete(self.conn,self.stream_key)
                 self.conn.close()
 
         class StreamWriter(CommonStreamIO.State.StreamWriter, Base):
-            def __init__(self, redis_url, stream_key, shape, maxlen=10, use_shared_memory=True):
+            def __init__(self, redis_url, stream_key, shape, metadata={}, maxlen=10, use_shared_memory=True):
                 super().__init__(redis_url, stream_key, shape, maxlen, use_shared_memory)
                 if self.use_shared_memory:
                     self.smIO = SharedMemoryIO().writer(stream_key, True, shape)
 
                 if stream_key is not None:
-                    if is_stream_exists(self.conn,stream_key):
+                    if RedisStream.stream_exists(self.conn,stream_key):
                         raise ValueError(f'write stream key {stream_key} is already exists!')
+                
+                metadata['stop'] = False
+                RedisStream.steam_info_set(self.conn,self.stream_key,metadata)
+                self.metadata=metadata
                               
 
             def write(self, image:np.ndarray, metadata={}):
@@ -225,16 +265,13 @@ class RedisStream(CommonStreamIO):
                 self.last_id = '0-0'
 
                 if stream_key is not None:
-                    if not is_stream_exists(self.conn,stream_key):
+                    if not RedisStream.stream_exists(self.conn,stream_key):
                         raise ValueError(f'read stream key {stream_key} is not exists!')
                 
                 # first run
                 image,frame_metadata = self.read()
                 self.shape = image.shape
                 
-            def stop(self):
-                self._stop = True
-
             def read(self):
                 if self._stop:
                     raise StopIteration()
@@ -260,10 +297,15 @@ class RedisStream(CommonStreamIO):
         self.state = RedisStream.State.StreamReader(redis_url=redis_url, stream_key=stream_key)
         return self
     
-    def writer(self, redis_url, write_stream_key, shape):
-        self.state = RedisStream.State.StreamWriter(redis_url, write_stream_key, shape=shape)
-        return self    
+    def writer(self, redis_url, write_stream_key, shape, metadata={}):
+        self.state = RedisStream.State.StreamWriter(redis_url, write_stream_key, shape=shape, metadata=metadata)
+        return self
+    
+    def get_steam_info(self):
+        return RedisStream.steam_info_get(self.state.conn, self.state.stream_key)
 
+    def set_steam_info(self,metadata):
+        return RedisStream.steam_info_set(self.state.conn, self.state.stream_key, metadata)
 class VideoStreamReader(CommonStreamIO.State.StreamReader):
     class State:
         @staticmethod
@@ -322,69 +364,51 @@ class RedisBidirectionalStream:
     class State:
         class Bidirectional:
             def __init__(self, frame_processor=lambda i,frame,frame_metadata:(frame,frame_metadata),
-                         metadata={},
-                         stream_reader:CommonStreamIO=None,stream_writer:RedisStream=None):
+                         stream_reader:RedisStream=None,stream_writer:RedisStream=None):
                 
                 self.frame_processor = frame_processor
-                self.metadata = metadata
                 self.stream_reader = stream_reader
                 self.stream_writer = stream_writer
 
             def run(self):
                 if self.stream_reader is None:raise ValueError('stream_reader is None')
                 if self.stream_writer is None:raise ValueError('stream_writer is None')
-
-                frame_processor = self.frame_processor
-                redis_url = self.stream_writer.state.redis_url
-                metadata:dict = self.metadata
-
-                reader = self.stream_reader
-                writer = self.stream_writer
-                write_stream_key = writer.state.stream_key
-
-                metadata['stop'] = False
-                
-                conn = getredis(redis_url)
-                writer.state.write_info(metadata)
-
-                res = {'msg':''}
-                    
+                res = {'msg':''}                    
                 try:
-                    for frame_count,(image,frame_metadata) in enumerate(reader):
+                    for frame_count,(image,frame_metadata) in enumerate(self.stream_reader):
 
                         if frame_count%100==0:
                             start_time = time.time()
                         else:
                             elapsed_time = time.time() - start_time + 1e-5
-                            metadata['fps'] = frame_metadata['fps'] = (frame_count%100) / elapsed_time
+                            frame_metadata['fps'] = fps = (frame_count%100) / elapsed_time
 
-                        image,frame_processor_metadata = frame_processor(frame_count,image,frame_metadata)
+                        image,frame_processor_metadata = self.frame_processor(frame_count,image,frame_metadata)
                         frame_metadata.update(frame_processor_metadata)
-                        writer.write(image,frame_metadata)
+                        self.stream_writer.write(image,frame_metadata)
 
                         if frame_count%1000==100:
-                            fps,metadata = metadata['fps'],json.loads(conn.get(f'info:{write_stream_key}'))
+                            metadata = self.stream_writer.get_steam_info()
                             metadata['fps'] = fps
-                            if metadata.get('stop',True):
-                                if reader and hasattr(reader,'stop'):reader.stop()
-                                if writer and hasattr(writer,'stop'):writer.stop()
+                            if metadata.get('stop',False):
+                                if self.stream_reader and hasattr(self.stream_reader,'stop'):self.stream_reader.stop()
+                                if self.stream_writer and hasattr(self.stream_writer,'stop'):self.stream_writer.stop()
                                 break
-                            writer.state.write_info(metadata)
+                            self.stream_writer.set_steam_info(metadata)
 
                 except Exception as e:
                         res['error'] = str(e)
                         print(res)
                 finally:
-                    conn.close()
-                    if reader and hasattr(reader,'close'):
-                        reader.close()
-                        res['msg'] += f'\nstream {write_stream_key} reader.close()'
+                    if self.stream_reader and hasattr(self.stream_reader,'close'):
+                        self.stream_reader.close()
+                        res['msg'] += f'\nstream {self.stream_reader.state.stream_key} reader.close()'
                     
-                    if writer and hasattr(writer,'close'):
-                        writer.close()
-                        res['msg'] += f'\stream {write_stream_key} writer.close()'
+                    if self.stream_writer and hasattr(self.stream_writer,'close'):
+                        self.stream_writer.close()
+                        res['msg'] += f'\stream {self.stream_writer.state.stream_key} writer.close()'
 
-                    res['msg'] += f'\ndelete stream {write_stream_key}'
+                    res['msg'] += f'\ndelete stream {self.stream_writer.state.stream_key}'
                         
                     return res
 
@@ -408,13 +432,13 @@ class RedisBidirectionalStream:
                         else:
                             elapsed_time = time.time() - start_time + 1e-5
                             frame_metadata['fps'] = (frame_count%100) / elapsed_time
-
                         image,frame_metadata = frame_processor(frame_count,image,frame_metadata)
 
-                        if frame_metadata:
-                            frame_metadata.update(frame_metadata)
-
-
+                        if frame_count%1000==100:
+                            if reader.get_steam_info().get('stop',False):
+                                if reader and hasattr(reader,'stop'):reader.stop()
+                                break
+                            
                 except Exception as e:
                         res['error'] = str(e)
                         print(res)
@@ -425,28 +449,13 @@ class RedisBidirectionalStream:
                     return res
         class WriteOnly(Bidirectional):
             def __init__(self, frame_processor=lambda i,frame,frame_metadata:(frame,frame_metadata),
-                        metadata={},
                         stream_writer:RedisStream=None):
                 self.frame_processor = frame_processor
-                self.metadata = metadata
                 self.stream_writer = stream_writer
                 self.redis_url = self.stream_writer.state.redis_url
             
             def run(self):
                 if self.stream_writer is None:raise ValueError('stream_writer is None')
-
-                frame_processor = self.frame_processor
-                redis_url = self.stream_writer.state.redis_url
-                metadata:dict = self.metadata
-
-                writer = self.stream_writer
-                write_stream_key = writer.state.stream_key
-
-                metadata['stop'] = False
-                
-                conn = getredis(redis_url)
-                writer.state.write_info(metadata)
-
                 res = {'msg':''}
                 frame_count = -1
                 try:
@@ -457,48 +466,45 @@ class RedisBidirectionalStream:
                             start_time = time.time()
                         else:
                             elapsed_time = time.time() - start_time + 1e-5
-                            metadata['fps'] = frame_metadata['fps'] = (frame_count%100) / elapsed_time
+                            frame_metadata['fps'] = fps = (frame_count%100) / elapsed_time
 
-                        image,frame_processor_metadata = frame_processor(frame_count,image,frame_metadata)
+                        image,frame_processor_metadata = self.frame_processor(frame_count,image,frame_metadata)
                         frame_metadata.update(frame_processor_metadata)
-                        writer.write(image,frame_metadata)
+                        self.stream_writer.write(image,frame_metadata)
 
                         if frame_count%1000==100:
-                            fps,metadata = metadata['fps'],json.loads(conn.get(f'info:{write_stream_key}'))
+                            metadata = self.stream_writer.get_steam_info()
                             metadata['fps'] = fps
-                            if metadata.get('stop',True):
-                                if writer and hasattr(writer,'stop'):writer.stop()
+                            if metadata.get('stop',False):
+                                if self.stream_writer and hasattr(self.stream_writer,'stop'):self.stream_writer.stop()
                                 break
-                            writer.state.write_info(metadata)
+                            self.stream_writer.set_steam_info(metadata)
 
                 except Exception as e:
                         res['error'] = str(e)
                         print(res)
-                finally:
-                    conn.close()                    
-                    if writer and hasattr(writer,'close'):
-                        writer.close()
-                        res['msg'] += f'\stream {write_stream_key} writer.close()'
+                finally:                
+                    if self.stream_writer and hasattr(self.stream_writer,'close'):
+                        self.stream_writer.close()
+                        res['msg'] += f'\stream {self.stream_writer.state.stream_key} writer.close()'
 
-                    res['msg'] += f'\ndelete stream {write_stream_key}'
+                    res['msg'] += f'\ndelete stream {self.stream_writer.state.stream_key}'
                         
                     return res
 
     def __init__(self) -> None:
         self.state = RedisBidirectionalStream.State.Bidirectional()
 
-    def bidirectional(self, frame_processor,stream_reader:CommonStreamIO,stream_writer:RedisStream,
-                        metadata={},):
-        self.state = RedisBidirectionalStream.State.Bidirectional(frame_processor,metadata,stream_reader,stream_writer)
+    def bidirectional(self, frame_processor,stream_reader:CommonStreamIO,stream_writer:RedisStream):
+        self.state = RedisBidirectionalStream.State.Bidirectional(frame_processor,stream_reader,stream_writer)
         return self
         
     def readOnly(self, frame_processor,stream_reader:RedisStream):
         self.state = RedisBidirectionalStream.State.ReadOnly(frame_processor,stream_reader)
         return self
                 
-    def writeOnly(self, frame_processor,stream_writer:RedisStream,
-                        metadata={},):
-        self.state = RedisBidirectionalStream.State.WriteOnly(frame_processor,metadata,stream_writer)
+    def writeOnly(self, frame_processor,stream_writer:RedisStream):
+        self.state = RedisBidirectionalStream.State.WriteOnly(frame_processor,stream_writer)
         return self
 
     def run(self):
@@ -514,25 +520,16 @@ class CeleryTaskManager:
     @staticmethod
     @celery_app.task(bind=True)    
     def stop_video_stream(t: Task, redis_stream_key='camera-stream:0', redis_url='redis://127.0.0.1:6379'):
-        conn = getredis(redis_url)
-        metadata = conn.get(f'info:{redis_stream_key}')
-        metadata = json.loads(metadata)
-        metadata['stop'] = True
-        conn.set(f'info:{redis_stream_key}',json.dumps(metadata))
+        RedisStream.steam_stop(redis_url,redis_stream_key)
         return {'msg':f'stop stream {redis_stream_key}'}
     
     @staticmethod
     @celery_app.task(bind=True)    
     def stop_all_stream(t: Task, redis_url='redis://127.0.0.1:6379'):
-        conn = getredis(redis_url)
-        allks = conn.keys(f'info:*')
-        conn.close()
+        conn = RedisStream.getredis(redis_url)
+        allks = RedisStream.steam_list(conn)
         for k in allks:
-            redis_stream_key = k.decode().replace('info:','')
-            metadata = conn.get(f'info:{redis_stream_key}')
-            metadata = json.loads(metadata)
-            metadata['stop'] = True
-            conn.set(f'info:{redis_stream_key}',json.dumps(metadata))
+            RedisStream.steam_stop(conn,k)
         return {'msg':f'stop all stream {allks}'}
 
     @staticmethod
@@ -555,10 +552,10 @@ class CeleryTaskManager:
             # fps = frame_metadata.get('fps',0)
             # CeleryTaskManager.debug_cvshow(image.copy(),fps,f'Streamed directly from camera to {stream_key}')
             return image,frame_metadata
-        stream_writer=RedisStream().writer(redis_url,redis_stream_key,shape=stream_reader.state.shape)
         metadata=dict(task_id=t.request.id,video_src=video_src, fps=fps,shape=stream_reader.state.shape)
+        stream_writer=RedisStream().writer(redis_url,redis_stream_key,metadata=metadata,shape=stream_reader.state.shape)
         print(f"Stream {redis_stream_key} started. By task id of {t.request.id}")
-        return RedisBidirectionalStream().writeOnly(frame_gen,stream_writer,metadata).run()
+        return RedisBidirectionalStream().writeOnly(frame_gen,stream_writer).run()
        
     @staticmethod
     @celery_app.task(bind=True)
@@ -580,10 +577,12 @@ class CeleryTaskManager:
     @staticmethod
     def make_redis_bidirectional(frame_processor,metadata,redis_url,read_stream_key,write_stream_key):        
         stream_reader=RedisStream().reader(redis_url=redis_url, stream_key=read_stream_key)
+        
         outshape=frame_processor(0,(np.random.rand(*stream_reader.state.shape)*255).astype(np.uint8),{})[0].shape
-        stream_writer=RedisStream().writer(redis_url,write_stream_key,shape=outshape)
-        metadata.update(dict(video_src=read_stream_key,intshape=stream_reader.state.shape,outshape=outshape))
-        return RedisBidirectionalStream().bidirectional(frame_processor,stream_reader,stream_writer,metadata)
+        metadata.update(dict(video_src=read_stream_key,inshape=stream_reader.state.shape,outshape=outshape))
+
+        stream_writer=RedisStream().writer(redis_url,write_stream_key,metadata=metadata,shape=outshape)
+        return RedisBidirectionalStream().bidirectional(frame_processor,stream_reader,stream_writer)
     
     @staticmethod
     @celery_app.task(bind=True)
@@ -616,7 +615,7 @@ class CeleryTaskManager:
                                             write_stream_key: str='resize-stream:0'):
         
         def frame_processor(i,image,frame_metadata):
-            return cv2.resize(image, (w,h)), frame_metadata        
+            return cv2.resize(image, (w,h)), frame_metadata
         metadata=dict(task_id=t.request.id,resize=(w,h))
         return CeleryTaskManager.make_redis_bidirectional(frame_processor,metadata,redis_url,read_stream_key,write_stream_key).run()
 
