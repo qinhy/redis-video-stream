@@ -58,7 +58,7 @@ class CommonIO:
     class Reader(Base):
         def read(self):
             raise ValueError("[CommonIO.Reader]: not implemented")      
-    class Writer(Base):                        
+    class Writer(Base):
         def write(self,data):
             raise ValueError("[CommonIO.Writer]: not implemented")
 
@@ -282,6 +282,8 @@ class VideoStreamReader(CommonStreamIO.StreamReader):
     @staticmethod
     def isFile(p):
         return not str(p).isdecimal()
+    def isChrome(p):
+        return str(p).lower()=='chrome'
     class Base:
         def __init__(self, video_src=0, fps=30.0, width=800, height=600):
             self.video_src=video_src
@@ -311,11 +313,39 @@ class VideoStreamReader(CommonStreamIO.StreamReader):
 
     class File(Base):
         def read(self):
-            return super().read(),{}
+            return super().read(),{}        
+
+    class Chrome(Base):
+        def __init__(self, fps=30, width=800, height=600):
+            import pygetwindow as gw
+            import pyautogui
+            self.pyautogui = pyautogui
+            chrome_windows = [window for window in gw.getWindowsWithTitle('Chrome')]
+            if not chrome_windows:raise ValueError("No Chrome window found.")
+            chrome_window = chrome_windows[0]
+            left, top, right, bottom = chrome_window.left, chrome_window.top, chrome_window.right, chrome_window.bottom
+            self.region = (left, top, right-left, bottom-top)
+            self.fps = fps
+            self.width = width
+            self.height = height
+            # first run
+            image,frame_metadata = self.read()
+            self.shape = image.shape
+            
+        def read(self):
+            # Capture the region of the screen where Chrome is located
+            img = self.pyautogui.screenshot(region=self.region)
+            # Convert the image to a numpy array
+            frame = np.array(img)            
+            # Convert it from BGR (Pillow default) to RGB (OpenCV default)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return frame,{}
         
     def reader(self, video_src=0, fps=30.0, width=800, height=600):
         if not VideoStreamReader.isFile(video_src):
             return VideoStreamReader.Camera(int(video_src),fps,width,height)
+        if VideoStreamReader.isChrome(video_src):
+            return VideoStreamReader.Chrome(fps,width,height)
         return VideoStreamReader.File(video_src,fps,width,height)
 
 class RedisBidirectionalStream:
@@ -327,25 +357,20 @@ class RedisBidirectionalStream:
             self.stream_writer = stream_writer
             self.stream_reader = stream_reader
             self.streams:list[RedisStream.Base] = [self.stream_reader, self.stream_writer]
-
-        def _fps_run(self,frame_count,start_time):            
-            if frame_count%100==0:
-                return 0, time.time()
-            else:
-                elapsed_time = time.time() - start_time + 1e-5
-                return (frame_count%100) / elapsed_time , start_time
             
         def run(self):
             for s in self.streams:
                 if s is None:raise ValueError('stream is None')
                 
             res = {'msg':''}
-            start_time = time.time()
             try:
                 for frame_count,(image,frame_metadata) in enumerate(self.stream_reader):
-
-                    fps,start_time = self._fps_run(frame_count,start_time)
-                    frame_metadata['fps'] = fps
+                    if frame_count%100==0:
+                        start_time = time.time()
+                    else:
+                        elapsed_time = time.time() - start_time + 1e-5
+                        frame_metadata['fps'] = fps = (frame_count%100) / elapsed_time
+                    
 
                     image,frame_processor_metadata = self.frame_processor(frame_count,image,frame_metadata)
                     frame_metadata.update(frame_processor_metadata)
@@ -363,7 +388,7 @@ class RedisBidirectionalStream:
             except Exception as e:
                     res['error'] = str(e)
                     print(res)
-            finally:                
+            finally:
                 for s in self.streams:
                     s.close()
                 return res
@@ -389,12 +414,13 @@ class RedisBidirectionalStream:
         def run(self):
             if self.stream_reader is None:raise ValueError('stream_reader is None')
             res = {'msg':''}
-            start_time = time.time()
             try:
                 for frame_count,(image,frame_metadata) in enumerate(self.stream_reader):
-
-                    fps,start_time = self._fps_run(frame_count,start_time)
-                    frame_metadata['fps'] = fps
+                    if frame_count%100==0:
+                        start_time = time.time()
+                    else:
+                        elapsed_time = time.time() - start_time + 1e-5
+                        frame_metadata['fps'] = fps = (frame_count%100) / elapsed_time
 
                     image,frame_metadata = self.frame_processor(frame_count,image,frame_metadata)
 

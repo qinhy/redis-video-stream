@@ -104,4 +104,4 @@ iface_web_image_show = gr.Interface(fn=web_image_show,inputs=gr.Textbox(label="E
 # Combine all interfaces into tabs
 tabbed_interface = gr.TabbedInterface([iface_set_urls, iface_task_status, iface_stop_task, iface_start_video_stream, iface_stop_video_stream, iface_stop_all_stream, iface_video_stream_info, iface_clone_stream, iface_cv_resize_stream, iface_yolo_image_stream,iface_web_image_show], 
                                       ["Set URLs", "Task Status", "Stop Task", "Start Video Stream", "Stop Video Stream", "Stop All Streams", "Video Stream Info", "Clone Stream", "Resize Stream", "YOLO Image Stream", "Web Image Show"])
-tabbed_interface.launch()
+tabbed_interface.launch(server_name='0.0.0.0')

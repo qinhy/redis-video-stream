@@ -4,7 +4,8 @@ from celery_task import CeleryTaskManager,get_video_stream_info
 redis_url='redis://127.0.0.1:6379'
 
 task = CeleryTaskManager.start_video_stream.delay(
-    video_src="d:/Download/Driving from Hell's Kitchen Manhattan to Newark Liberty International Airport.mp4",
+    # video_src="d:/Download/Driving from Hell's Kitchen Manhattan to Newark Liberty International Airport.mp4",
+    video_src="chrome",
     fps=30, width=1920, height=1080,
     redis_stream_key='camera:0', redis_url=redis_url)
 
