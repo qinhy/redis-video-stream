@@ -1,9 +1,9 @@
 import cv2
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from celery.result import AsyncResult
 import redis
-from celery_task import CeleryTaskManager, RedisStream,celery_app, get_video_stream_info
+from celery_task import CeleryTaskManager, RedisStream,celery_app
 from starlette.background import BackgroundTask
 
 CeleryTaskManager.stop_all_stream.delay('redis://127.0.0.1:6379')
@@ -64,7 +64,7 @@ async def stop_all_stream(redis_url: str = 'redis://127.0.0.1:6379'):
 
 @app.get("/video_stream_info/")
 async def video_stream_info(redis_url: str = 'redis://127.0.0.1:6379'):
-    return get_video_stream_info(redis_url)
+    return RedisStream.stream_all_info(redis_url)
 
 @app.get("/clone_stream/")
 async def clone_stream(redis_url: str='redis://127.0.0.1:6379', read_stream_key: str='camera:0',
