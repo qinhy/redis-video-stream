@@ -7,9 +7,12 @@ from multiprocessing import shared_memory
 import uuid
 
 import cv2
+import pandas as pd
+import qrcode
 import redis
 import torch
 import numpy as np
+from PIL import Image
 
 from celery import Celery
 from celery.app import task as Task
@@ -559,7 +562,7 @@ class CeleryTaskManager:
 
     @staticmethod
     @celery_app.task(bind=True)
-    def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
+    def _yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
                                             write_stream_key: str='ai-stream:0',
                                             modelname:str='yolov5s6',conf=0.6):
         
@@ -576,4 +579,49 @@ class CeleryTaskManager:
 
         metadata=dict(task_id=t.request.id,modelname=modelname,conf=conf)
         return CeleryTaskManager.make_redis_bidirectional(frame_processor,metadata,redis_url,read_stream_key,write_stream_key).run()
+
+
+    @staticmethod
+    @celery_app.task(bind=True)
+    def yolo_image_stream(t: Task, redis_url: str, read_stream_key: str='camera-stream:0',
+                                            write_stream_key: str='ai-stream:0',
+                                            modelname:str='yolov5s6',conf=0.6):
         
+        model = torch.hub.load(f'ultralytics/{modelname[:6]}', modelname, pretrained=True)
+        model.conf = conf
+        model.eval()
+        model((np.random.rand(1280,1280,3)*255).astype(np.uint8)) # for pre loading
+
+        def frame_processor(i,image,frame_metadata,model=model):
+            results = model(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            results.render()
+            image = cv2.cvtColor(results.ims[0], cv2.COLOR_RGB2BGR)
+            
+            detections = results.pandas().xyxy[0]
+            detections['confidence'] = pd.to_numeric(detections['confidence'], errors='coerce')
+
+            # Step 2: Format and Filter Detection Results
+            # Extract the top 10 detection results based on confidence
+            top_detections = detections.nlargest(10, 'confidence')
+            # Convert detection results to JSON
+            detection_results = top_detections.to_dict(orient='records')
+            detection_json = json.dumps(detection_results, indent=4)
+            # Step 3: Generate the QR Code
+            qr = qrcode.QRCode(
+                version=1,  # Adjust version if needed
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=4,
+            )
+            qr.add_data(detection_json)
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            qr_img = qr_img.resize((200, 200))  # Adjust size if needed
+            qr_img = cv2.cvtColor(np.asarray(qr_img,dtype=np.uint8)*255, cv2.COLOR_GRAY2RGB)
+            # Step 4: Overlay QR Code on Detection Image
+            offset = 10
+            image[offset:qr_img.shape[0]+offset,offset:qr_img.shape[1]+offset,:] = qr_img
+            return image, frame_metadata
+
+        metadata=dict(task_id=t.request.id,modelname=modelname,conf=conf)
+        return CeleryTaskManager.make_redis_bidirectional(frame_processor,metadata,redis_url,read_stream_key,write_stream_key).run()
