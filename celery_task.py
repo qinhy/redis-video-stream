@@ -604,8 +604,9 @@ class CeleryTaskManager:
             # Extract the top 10 detection results based on confidence
             top_detections = detections.nlargest(10, 'confidence')
             # Convert detection results to JSON
-            detection_results = top_detections.to_dict(orient='records')
-            detection_json = json.dumps(detection_results, indent=4)
+            # detection_results = top_detections.to_dict(orient='records')
+            # detection_json = json.dumps(detection_results, indent=4)
+            detection_str = top_detections.to_csv(float_format='%.2f')
             # Step 3: Generate the QR Code
             qr = qrcode.QRCode(
                 version=1,  # Adjust version if needed
@@ -613,7 +614,7 @@ class CeleryTaskManager:
                 box_size=10,
                 border=4,
             )
-            qr.add_data(detection_json)
+            qr.add_data(detection_str)
             qr.make(fit=True)
             qr_img = qr.make_image(fill_color="black", back_color="white")
             qr_img = qr_img.resize((200, 200))  # Adjust size if needed
@@ -621,6 +622,9 @@ class CeleryTaskManager:
             # Step 4: Overlay QR Code on Detection Image
             offset = 10
             image[offset:qr_img.shape[0]+offset,offset:qr_img.shape[1]+offset,:] = qr_img
+            # fontscale = 1.0
+            # for i,s in enumerate(detection_str.split('\n')):
+            #     cv2.putText(image, s[:-1], (int(30*fontscale), (i+1)* int(30*fontscale)), cv2.FONT_HERSHEY_SIMPLEX, fontscale, (0, 0, 0), 2, cv2.LINE_AA)
             return image, frame_metadata
 
         metadata=dict(task_id=t.request.id,modelname=modelname,conf=conf)
