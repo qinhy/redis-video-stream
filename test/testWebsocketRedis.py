@@ -1,8 +1,9 @@
 import asyncio
 import json
+from openai import BaseModel
 import redis.asyncio as redis
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI()
 
@@ -61,7 +62,7 @@ async def get_homepage():
                 return;
             }
 
-            wsPubSub = new WebSocket(`ws://localhost:8000/ws/pubsub/${channel}`);
+            wsPubSub = new WebSocket(`ws://localhost:8000/redis/ws/pubsub/${channel}`);
             wsPubSub.onopen = function() {
                 document.getElementById('pubsubControls').style.display = 'block';
                 console.log(`Connected to PubSub channel: ${channel}`);
@@ -86,7 +87,7 @@ async def get_homepage():
         });
 
         document.getElementById('connectCommand').addEventListener('click', function() {
-            wsCommand = new WebSocket(`ws://localhost:8000/ws`);
+            wsCommand = new WebSocket(`ws://localhost:8000/redis/ws`);
             wsCommand.onopen = function() {
                 document.getElementById('commandControls').style.display = 'block';
                 console.log('Connected to Command WebSocket.');
@@ -138,7 +139,7 @@ async def get_homepage():
     """
     return html_content
 
-@app.websocket("/ws/pubsub/{channel}")
+@app.websocket("/redis/ws/pubsub/{channel}")
 async def websocket_endpoint(websocket: WebSocket, channel: str):
     await websocket.accept()
     pubsub = redis_client.pubsub()
@@ -164,7 +165,7 @@ async def websocket_endpoint(websocket: WebSocket, channel: str):
         send_task.cancel()  # Clean up the background task when the connection is closed
         await pubsub.unsubscribe(channel)
 
-@app.websocket("/ws")
+@app.websocket("/redis/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     shared_data["count"] += 1
@@ -219,3 +220,62 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"WebSocket connection closed: {e}")
     finally:
         shared_data["count"] -= 1
+        
+class RedisCommand(BaseModel):
+    key: str
+    value: str = None
+
+@app.post("/redis/set/")
+async def set_key(command: RedisCommand):
+    if not command.key or not command.value:
+        raise HTTPException(status_code=400, detail="Key and value must be provided")
+    await redis_client.set(command.key, command.value)
+    return {"message": f"Key '{command.key}' set to '{command.value}'"}
+
+@app.get("/redis/get/{key}")
+async def get_key(key: str):
+    value = await redis_client.get(key)
+    if value is None:
+        raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
+    return {"key": key, "value": value}
+
+@app.delete("/redis/delete/{key}")
+async def delete_key(key: str):
+    deleted_count = await redis_client.delete(key)
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
+    return {"message": f"Key '{key}' deleted"}
+
+@app.get("/redis/keys/{pattern}")
+async def get_keys(pattern: str = "*"):
+    keys = await redis_client.keys(pattern)
+    if not keys:
+        return {"message": "No keys found"}
+    return {"keys": keys}
+
+class PubSubMessage(BaseModel):
+    channel: str
+    message: str
+
+@app.post("/redis/pub/")
+async def publish_message(msg: PubSubMessage):
+    await redis_client.publish(msg.channel, msg.message)
+    return {"message": f"Message published to channel '{msg.channel}'"}
+
+
+@app.get("/redis/sub/{channel}")
+async def subscribe_to_channel(channel: str):
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+
+    async def event_stream():
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield f"data: {message['data']}\n\n"  # Ensure double newline
+        except asyncio.CancelledError:
+            print(f"Stopping subscription to channel '{channel}'")
+        finally:
+            await pubsub.unsubscribe(channel)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
