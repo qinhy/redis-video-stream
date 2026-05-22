@@ -10,6 +10,7 @@ uv sync
 Common entrypoints:
 
 ```bash
+bash scripts/linux/redis.sh
 uv run celery -A redis_video_stream.tasks worker
 uv run uvicorn redis_video_stream.api:app --host 0.0.0.0
 uv run python -m redis_video_stream.ui
@@ -22,6 +23,7 @@ Repo layout:
 - `src/redis_video_stream/`: app code
 - `tests/`: websocket test/demo apps
 - `examples/`: runnable examples
+- `scripts/linux/`: Linux launchers
 - `scripts/windows/`: Windows launchers
 - `assets/models/`: model artifacts
 - `tools/redis/windows/`: bundled Redis binaries

@@ -7,7 +7,8 @@ redis_url = "redis://127.0.0.1:6379"
 def main():
     task = CeleryTaskManager.start_video_stream.delay(
         # video_src="d:/Download/Driving from Hell's Kitchen Manhattan to Newark Liberty International Airport.mp4",
-        video_src="chrome",
+        # video_src="chrome",
+        video_src="/mnt/c/Users/ixs/Downloads/NXC/20250926/20250926PM.mp4",
         fps=30,
         width=1920,
         height=1080,

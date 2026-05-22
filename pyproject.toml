@@ -23,11 +23,28 @@ dependencies = [
     "pygetwindow",
     "qrcode",
     "redis",
+
+    # Make these direct deps so uv applies the PyTorch source rules.
     "torch",
+    "torchvision",
+
     "uvicorn",
     "ultralytics>=8.4.52",
     "seaborn>=0.13.2",
 ]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.setuptools.package-dir]
 "" = "src"
