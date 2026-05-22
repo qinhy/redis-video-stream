@@ -9,11 +9,11 @@ description = "Redis-backed video streaming tasks with Celery, FastAPI, and Grad
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiohttp",
+    # "aiohttp",
     "celery",
     "fastapi",
     "flower",
-    "gradio",
+    # "gradio",
     "numpy",
     "opencv-python",
     "pandas",

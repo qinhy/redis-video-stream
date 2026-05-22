@@ -26,7 +26,7 @@ start_script "$SCRIPT_DIR/scripts/linux/redis.sh"
 start_script "$SCRIPT_DIR/scripts/linux/uvicorn.sh"
 start_script "$SCRIPT_DIR/scripts/linux/celery.sh"
 start_script "$SCRIPT_DIR/scripts/linux/flower.sh"
-start_script "$SCRIPT_DIR/scripts/linux/gradio.sh"
+# start_script "$SCRIPT_DIR/scripts/linux/gradio.sh"
 start_script "$SCRIPT_DIR/scripts/linux/example_pipeline.sh"
 
 wait
