@@ -1,3 +1,7 @@
-__pycache__/*
+__pycache__/
 *.pt
-/test/__pycache__
+.venv/
+.pytest_cache/
+assets/models/yolov8n.onnx
+/src/redis_video_stream.egg-info
+*.onnx

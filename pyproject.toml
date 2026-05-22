@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redis-video-stream"
+version = "0.1.0"
+description = "Redis-backed video streaming tasks with Celery, FastAPI, and Gradio."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp",
+    "celery",
+    "fastapi",
+    "flower",
+    "gradio",
+    "numpy",
+    "opencv-python",
+    "pandas",
+    "pillow",
+    "pydantic",
+    "pyautogui",
+    "pygetwindow",
+    "qrcode",
+    "redis",
+    "torch",
+    "uvicorn",
+    "ultralytics>=8.4.52",
+    "seaborn>=0.13.2",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]

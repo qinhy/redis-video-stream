@@ -1,4 +1,31 @@
 # redis-video-stream
+## uv setup
+
+This repo now uses [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
+
+```bash
+uv sync
+```
+
+Common entrypoints:
+
+```bash
+uv run celery -A redis_video_stream.tasks worker
+uv run uvicorn redis_video_stream.api:app --host 0.0.0.0
+uv run python -m redis_video_stream.ui
+uv run celery -A redis_video_stream.tasks flower -b redis://127.0.0.1 --loglevel=INFO
+uv run python examples/pipeline.py
+```
+
+Repo layout:
+
+- `src/redis_video_stream/`: app code
+- `tests/`: websocket test/demo apps
+- `examples/`: runnable examples
+- `scripts/windows/`: Windows launchers
+- `assets/models/`: model artifacts
+- `tools/redis/windows/`: bundled Redis binaries
+
 To wrap your video capture and processing script into a Celery task for improved stability and scalability, you will need to do a few things:
 
 1. **Set up a Celery application**: Configure Celery with Redis as the broker and optionally as the result backend.
@@ -7,11 +34,11 @@ To wrap your video capture and processing script into a Celery task for improved
 
 Here’s an example of how you might refactor your script to use Celery:
 
-### Step 1: Install Celery and Redis
-If not already installed, you will need Celery and Redis. You can install Celery with Redis support via pip:
+### Step 1: Install project dependencies
+If not already installed, use `uv` to create the environment and install the repo dependencies:
 
 ```bash
-pip install celery redis
+uv sync
 ```
 
 ### Step 2: Set Up the Celery Application
@@ -97,7 +124,7 @@ if __name__ == '__main__':
 Run a Celery worker that will execute the video capture tasks:
 
 ```bash
-celery -A celery_app worker --loglevel=info --queues=video
+uv run celery -A celery_app worker --loglevel=info --queues=video
 ```
 
 ### Final Notes
